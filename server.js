@@ -12,6 +12,7 @@ const app = express();
 // Security Middleware
 app.use(helmet());
 
+
 // CORS Configuration
 const corsOptions = {
     origin: process.env.CORS_ORIGIN || '*',
@@ -777,3 +778,4 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
     process.exit(1);
 });
+
