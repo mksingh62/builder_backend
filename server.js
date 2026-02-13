@@ -728,12 +728,14 @@ app.post('/api/seed', async (req, res) => {
 
 // ==================== START SERVER ====================
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
+    const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
     console.log('╔════════════════════════════════════════════════════════════╗');
     console.log('║           Builder Site API Server Started                ║');
     console.log('╠════════════════════════════════════════════════════════════╣');
-    console.log(`║  Server:    http://localhost:${PORT}                        ║`);
-    console.log(`║  Health:    http://localhost:${PORT}/health                ║`);
+    console.log(`║  Server:    ${vercelUrl}                        ║`);
+    console.log(`║  Health:    ${vercelUrl}/health                    ║`);
+    console.log(`║  API Base:  ${vercelUrl}/api                      ║`);
     console.log(`║  Environment: ${process.env.NODE_ENV || 'development'}                            ║`);
     console.log('╚════════════════════════════════════════════════════════════╝');
 });
