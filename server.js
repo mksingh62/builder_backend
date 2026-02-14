@@ -926,6 +926,202 @@ app.post('/api/seed', async (req, res) => {
     }
 });
 
+// ==================== NEW ADVANCED FEATURES ROUTES ====================
+
+// Stage Master Routes
+app.get('/api/stages', authenticateToken, async (req, res) => {
+    try {
+        const stages = await StageMaster.find().sort({ order: 1 });
+        res.json(stages);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/stages', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const stage = new StageMaster(req.body);
+        await stage.save();
+        res.status(201).json(stage);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/stages/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const stage = await StageMaster.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        res.json(stage);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/stages/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        await StageMaster.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Stage deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Project Stage Routes
+app.get('/api/projects/:id/stages', authenticateToken, async (req, res) => {
+    try {
+        const projectStages = await ProjectStage.find({ project_id: req.params.id })
+            .sort({ stage_order: 1 });
+        res.json(projectStages);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/projects/:id/stages', authenticateToken, async (req, res) => {
+    try {
+        const projectStage = new ProjectStage({
+            project_id: req.params.id,
+            ...req.body
+        });
+        await projectStage.save();
+        res.status(201).json(projectStage);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (req, res) => {
+    try {
+        const projectStage = await ProjectStage.findByIdAndUpdate(
+            req.params.stageId, 
+            req.body, 
+            { new: true }
+        );
+        res.json(projectStage);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Daily Entry Routes
+app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res) => {
+    try {
+        const dailyEntries = await DailyEntry.find({ project_id: req.params.id })
+            .sort({ date: -1 });
+        res.json(dailyEntries);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res) => {
+    try {
+        const dailyEntry = new DailyEntry({
+            project_id: req.params.id,
+            ...req.body
+        });
+        
+        // Calculate total daily cost
+        let totalCost = dailyEntry.extra_expenses || 0;
+        
+        // Add material costs
+        for (const material of dailyEntry.materials_used) {
+            totalCost += material.cost || 0;
+        }
+        
+        dailyEntry.total_daily_cost = totalCost;
+        await dailyEntry.save();
+        
+        res.status(201).json(dailyEntry);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/daily-entries/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        await DailyEntry.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Daily entry deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Payment Routes
+app.get('/api/projects/:id/payments', authenticateToken, async (req, res) => {
+    try {
+        const payments = await Payment.find({ project_id: req.params.id })
+            .sort({ due_date: 1 });
+        res.json(payments);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/projects/:id/payments', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const payment = new Payment({
+            project_id: req.params.id,
+            ...req.body
+        });
+        await payment.save();
+        res.status(201).json(payment);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/payments/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const payment = await Payment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        res.json(payment);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/payments/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        await Payment.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Payment deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Document Routes
+app.get('/api/projects/:id/documents', authenticateToken, async (req, res) => {
+    try {
+        const documents = await Document.find({ project_id: req.params.id })
+            .sort({ createdAt: -1 });
+        res.json(documents);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/projects/:id/documents', authenticateToken, async (req, res) => {
+    try {
+        const document = new Document({
+            project_id: req.params.id,
+            ...req.body
+        });
+        await document.save();
+        res.status(201).json(document);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/documents/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        await Document.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Document deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
