@@ -1,76 +1,21 @@
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
-
-// Security Middleware
-app.use(helmet());
-
-// CORS Configuration
-const corsOptions = {
-    origin: process.env.CORS_ORIGIN || '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-    optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
-
-// Rate Limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
-    message: { error: 'Too many requests, please try again later.' }
-});
-app.use('/api/', limiter);
-
-// Body Parser
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Health Check Route
-app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
+app.use(cors());
+app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'house_construction_secret_key_2024';
 
-// MongoDB Connection with options
-const mongoOptions = {
-    maxPoolSize: 10,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-};
-
-mongoose.connect(process.env.MONGODB_URI, mongoOptions)
-    .then(() => {
-        console.log('✓ MongoDB Connected Successfully');
-        console.log(`✓ Database: ${mongoose.connection.name}`);
-    })
-    .catch(err => {
-        console.error('✗ MongoDB Connection Error:', err.message);
-        process.exit(1);
-    });
-
-// Mongoose Connection Events
-mongoose.connection.on('error', (err) => {
-    console.error('MongoDB connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-    console.warn('MongoDB disconnected. Attempting to reconnect...');
-});
-
-mongoose.connection.on('reconnected', () => {
-    console.log('MongoDB reconnected');
-});
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log('MongoDB Connected'))
+    .catch(err => console.error('MongoDB Connection Error:', err));
 
 // ==================== MODELS ====================
 
@@ -115,10 +60,15 @@ const Worker = mongoose.model('Worker', workerSchema);
 const projectSchema = new mongoose.Schema({
     project_name: { type: String, required: true },
     customer_name: String,
+    customer_phone: String,
+    site_address: String,
     area_sqft: { type: Number, default: 0 },
+    expected_duration: String,
     status: { type: String, enum: ['Planning', 'In Progress', 'Completed', 'Pending'], default: 'Planning' },
     start_date: Date,
     end_date: Date,
+    total_cost: { type: Number, default: 0 },
+    paid_amount: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
@@ -158,6 +108,118 @@ const quotationSchema = new mongoose.Schema({
 });
 const Quotation = mongoose.model('Quotation', quotationSchema);
 
+// ========== NEW MODELS FOR ADVANCED FLOW ==========
+
+// Construction Stages Master
+const stageMasterSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: String,
+    order: { type: Number, default: 0 }
+});
+const StageMaster = mongoose.model('StageMaster', stageMasterSchema);
+
+// Project Stage (stage-wise tracking)
+const projectStageSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    stage_name: String,
+    stage_order: Number,
+    status: { type: String, enum: ['Pending', 'In Progress', 'Completed'], default: 'Pending' },
+    start_date: Date,
+    end_date: Date,
+    material_cost: { type: Number, default: 0 },
+    labor_cost: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 }
+});
+const ProjectStage = mongoose.model('ProjectStage', projectStageSchema);
+
+// Stage Materials
+const stageMaterialSchema = new mongoose.Schema({
+    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+    material_name: String,
+    quantity: { type: Number, default: 0 },
+    unit_price: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 }
+});
+const StageMaterial = mongoose.model('StageMaterial', stageMaterialSchema);
+
+// Stage Workers
+const stageWorkerSchema = new mongoose.Schema({
+    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker' },
+    worker_name: String,
+    worker_role: String,
+    days: { type: Number, default: 0 },
+    daily_wage: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 }
+});
+const StageWorker = mongoose.model('StageWorker', stageWorkerSchema);
+
+// Daily Work Entry
+const dailyEntrySchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    date: { type: Date, default: Date.now },
+    workers_present: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Worker' }],
+    materials_used: [{
+        material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+        material_name: String,
+        quantity: Number,
+        cost: Number
+    }],
+    extra_expenses: { type: Number, default: 0 },
+    expense_description: String,
+    total_daily_cost: { type: Number, default: 0 },
+    notes: String
+});
+const DailyEntry = mongoose.model('DailyEntry', dailyEntrySchema);
+
+// Payment Milestone
+const paymentSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
+    payment_number: { type: Number, default: 1 },
+    milestone_name: String,
+    amount: { type: Number, required: true },
+    paid_amount: { type: Number, default: 0 },
+    due_date: Date,
+    status: { type: String, enum: ['Pending', 'Partial', 'Paid', 'Overdue'], default: 'Pending' },
+    payment_date: Date,
+    payment_mode: String,
+    transaction_id: String
+});
+const Payment = mongoose.model('Payment', paymentSchema);
+
+// Document
+const documentSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    document_type: { type: String, enum: ['Site Photo', 'Bill', 'Invoice', 'Material Proof', 'Contract', 'Other'] },
+    file_name: String,
+    file_url: String,
+    description: String,
+    uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+const Document = mongoose.model('Document', documentSchema);
+
+// Quotation Version
+const quotationVersionSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    version: { type: Number, default: 1 },
+    version_name: { type: String, default: 'v1' },
+    material_cost: { type: Number, default: 0 },
+    labor_cost: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 },
+    gst_amount: { type: Number, default: 0 },
+    grand_total: { type: Number, default: 0 },
+    status: { type: String, enum: ['Draft', 'Sent', 'Approved', 'Rejected', 'Revised'], default: 'Draft' },
+    approval_status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Modification Requested'], default: 'Pending' },
+    notes: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const QuotationVersion = mongoose.model('QuotationVersion', quotationVersionSchema);
+
 // Quotation Material Model
 const quotationMaterialSchema = new mongoose.Schema({
     quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
@@ -177,125 +239,6 @@ const quotationWorkerSchema = new mongoose.Schema({
     total_cost: Number
 });
 const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
-
-// ==================== NEW ADVANCED MODELS ====================
-
-// Construction Stage Schema
-const stageSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    description: String,
-    order: { type: Number, default: 0 }
-});
-const Stage = mongoose.model('Stage', stageSchema);
-
-// Project Stage Schema (stages for each project)
-const projectStageSchema = new mongoose.Schema({
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Stage' },
-    stage_name: String,
-    status: { type: String, enum: ['Pending', 'In Progress', 'Completed'], default: 'Pending' },
-    start_date: Date,
-    end_date: Date,
-    material_cost: { type: Number, default: 0 },
-    labor_cost: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now }
-});
-const ProjectStage = mongoose.model('ProjectStage', projectStageSchema);
-
-// Project Stage Material Schema
-const projectStageMaterialSchema = new mongoose.Schema({
-    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
-    material_name: String,
-    quantity: { type: Number, default: 0 },
-    unit_price: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 }
-});
-const ProjectStageMaterial = mongoose.model('ProjectStageMaterial', projectStageMaterialSchema);
-
-// Project Stage Worker Schema
-const projectStageWorkerSchema = new mongoose.Schema({
-    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker' },
-    worker_name: String,
-    worker_role: String,
-    days: { type: Number, default: 0 },
-    daily_wage: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 }
-});
-const ProjectStageWorker = mongoose.model('ProjectStageWorker', projectStageWorkerSchema);
-
-// Daily Work Entry Schema
-const dailyEntrySchema = new mongoose.Schema({
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    date: { type: Date, default: Date.now },
-    workers_present: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Worker' }],
-    materials_used: [{
-        material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
-        material_name: String,
-        quantity: Number,
-        cost: Number
-    }],
-    extra_expenses: { type: Number, default: 0 },
-    expense_description: String,
-    total_daily_cost: { type: Number, default: 0 },
-    notes: String,
-    createdAt: { type: Date, default: Date.now }
-});
-const DailyEntry = mongoose.model('DailyEntry', dailyEntrySchema);
-
-// Payment Schema
-const paymentSchema = new mongoose.Schema({
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
-    payment_number: { type: Number, default: 1 },
-    milestone_name: String,
-    amount: { type: Number, required: true },
-    paid_amount: { type: Number, default: 0 },
-    due_date: Date,
-    status: { type: String, enum: ['Pending', 'Partial', 'Paid', 'Overdue'], default: 'Pending' },
-    payment_date: Date,
-    payment_mode: String,
-    transaction_id: String,
-    notes: String,
-    createdAt: { type: Date, default: Date.now }
-});
-const Payment = mongoose.model('Payment', paymentSchema);
-
-// Document Schema
-const documentSchema = new mongoose.Schema({
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    document_type: { type: String, enum: ['Site Photo', 'Bill', 'Invoice', 'Material Proof', 'Contract', 'Other'], default: 'Other' },
-    file_name: String,
-    file_url: String,
-    description: String,
-    uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    createdAt: { type: Date, default: Date.now }
-});
-const Document = mongoose.model('Document', documentSchema);
-
-// Quotation Version Schema (for version management)
-const quotationVersionSchema = new mongoose.Schema({
-    quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
-    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    version: { type: Number, default: 1 },
-    version_name: { type: String, default: 'v1' },
-    material_cost: { type: Number, default: 0 },
-    labor_cost: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 },
-    gst_amount: { type: Number, default: 0 },
-    grand_total: { type: Number, default: 0 },
-    status: { type: String, enum: ['Draft', 'Sent', 'Approved', 'Rejected', 'Revised'], default: 'Draft' },
-    approval_status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Modification Requested'], default: 'Pending' },
-    approval_date: Date,
-    approved_by: String,
-    notes: String,
-    createdAt: { type: Date, default: Date.now }
-});
-const QuotationVersion = mongoose.model('QuotationVersion', quotationVersionSchema);
 
 // ==================== MIDDLEWARE ====================
 
@@ -317,8 +260,8 @@ const authenticateToken = (req, res, next) => {
 };
 
 const requireAdmin = (req, res, next) => {
-    if (req.user.role !== 'admin' && req.user.role !== 'staff') {
-        return res.status(403).json({ error: 'Admin or Staff access required' });
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
     }
     next();
 };
@@ -813,211 +756,171 @@ app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, r
 
 app.post('/api/seed', async (req, res) => {
     try {
-        const force = req.body.force === true;
-        
-        // Check if admin exists
-        const adminExists = await User.findOne({ phone: '1234567890' });
-        
-        if (adminExists && !force) {
-            return res.json({ message: 'Seed data already exists. Use force=true to re-seed.' });
-        }
-        
-        // Clear existing data if force=true
-        if (force) {
-            await User.deleteMany({});
-            await MaterialCategory.deleteMany({});
-            await Material.deleteMany({});
-            await Worker.deleteMany({});
-            await Project.deleteMany({});
-            await ProjectMaterial.deleteMany({});
-            await ProjectWorker.deleteMany({});
-            await Quotation.deleteMany({});
-            await QuotationMaterial.deleteMany({});
-            await QuotationWorker.deleteMany({});
-            await AppSetting.deleteMany({});
-        }
+        // Clear existing data first
+        await User.deleteMany({});
+        await MaterialCategory.deleteMany({});
+        await Material.deleteMany({});
+        await Worker.deleteMany({});
+        await Project.deleteMany({});
+        await ProjectMaterial.deleteMany({});
+        await ProjectWorker.deleteMany({});
+        await Quotation.deleteMany({});
+        await StageMaster.deleteMany({});
+        await ProjectStage.deleteMany({});
+        await StageMaterial.deleteMany({});
+        await StageWorker.deleteMany({});
+        await DailyEntry.deleteMany({});
+        await Payment.deleteMany({});
+        await Document.deleteMany({});
+        await QuotationVersion.deleteMany({});
+        await AppSetting.deleteMany({});
         
         // Create Users
-        const admin = await User.create({
-            name: 'Admin',
-            phone: '1234567890',
-            password: 'admin123',
-            role: 'admin'
+        const admin = await User.create({ name: 'Admin', phone: '1234567890', password: 'admin123', role: 'admin' });
+        const staff = await User.create({ name: 'Rahul Sharma', phone: '9876543210', password: 'staff123', role: 'staff' });
+        const customer = await User.create({ name: 'Amit Patel', phone: '9988776655', password: 'user123', role: 'customer' });
+        const customer2 = await User.create({ name: 'Suresh Kumar', phone: '9977665544', password: 'user123', role: 'customer' });
+        
+        // Create Material Categories
+        const categories = await MaterialCategory.create([
+            { name: 'Cement', description: 'All types of cement' },
+            { name: 'Steel', description: 'Steel bars and rods' },
+            { name: 'Bricks', description: 'Bricks and blocks' },
+            { name: 'Sand', description: 'Sand and aggregates' },
+            { name: 'Aggregate', description: 'Stone aggregates' },
+            { name: 'Paint', description: 'Paints and coatings' },
+            { name: 'Flooring', description: 'Flooring materials' },
+            { name: 'Electrical', description: 'Electrical materials' },
+            { name: 'Plumbing', description: 'Plumbing materials' }
+        ]);
+        
+        // Create Materials
+        const cementCat = categories.find(c => c.name === 'Cement');
+        const steelCat = categories.find(c => c.name === 'Steel');
+        const bricksCat = categories.find(c => c.name === 'Bricks');
+        const sandCat = categories.find(c => c.name === 'Sand');
+        const paintCat = categories.find(c => c.name === 'Paint');
+        
+        const materials = await Material.create([
+            { name: 'OPC 53 Grade Cement', category_id: cementCat._id, price_per_unit: 380, unit: 'bag' },
+            { name: 'PPC Cement', category_id: cementCat._id, price_per_unit: 350, unit: 'bag' },
+            { name: 'TMT Steel 12mm', category_id: steelCat._id, price_per_unit: 65, unit: 'kg' },
+            { name: 'TMT Steel 16mm', category_id: steelCat._id, price_per_unit: 68, unit: 'kg' },
+            { name: 'Red Bricks', category_id: bricksCat._id, price_per_unit: 8, unit: 'piece' },
+            { name: 'AAC Blocks', category_id: bricksCat._id, price_per_unit: 45, unit: 'piece' },
+            { name: 'River Sand', category_id: sandCat._id, price_per_unit: 45, unit: 'cft' },
+            { name: 'M Sand', category_id: sandCat._id, price_per_unit: 35, unit: 'cft' },
+            { name: 'Interior Paint', category_id: paintCat._id, price_per_unit: 280, unit: 'liter' },
+            { name: 'Exterior Paint', category_id: paintCat._id, price_per_unit: 320, unit: 'liter' }
+        ]);
+        
+        // Create Workers
+        const workers = await Worker.create([
+            { name: 'Mohan Singh', role: 'Mason', daily_wage: 800 },
+            { name: 'Ramesh Kumar', role: 'Mason', daily_wage: 750 },
+            { name: 'Sanjay Sharma', role: 'Carpenter', daily_wage: 700 },
+            { name: 'Kamal Ahmed', role: 'Electrician', daily_wage: 650 },
+            { name: 'Vijay Plumber', role: 'Plumber', daily_wage: 600 },
+            { name: 'Dinesh Kumar', role: 'Helper', daily_wage: 450 },
+            { name: 'Raj Kumar', role: 'Painter', daily_wage: 550 }
+        ]);
+        
+        // Create Construction Stages Master
+        const stages = await StageMaster.create([
+            { name: 'Foundation', description: 'Foundation work', order: 1 },
+            { name: 'Structure', description: 'Pillar and slab work', order: 2 },
+            { name: 'Brick Work', description: 'Wall construction', order: 3 },
+            { name: 'Plaster', description: 'Wall plastering', order: 4 },
+            { name: 'Flooring', description: 'Floor laying', order: 5 },
+            { name: 'Finishing', description: 'Paint and final work', order: 6 }
+        ]);
+        
+        // Create Projects
+        const project1 = await Project.create({
+            project_name: 'Sharma Villa',
+            customer_name: 'Amit Patel',
+            customer_phone: '9988776655',
+            site_address: '123, MG Road, Mumbai',
+            area_sqft: 2500,
+            status: 'In Progress',
+            start_date: new Date('2024-01-15'),
+            expected_duration: '6 months',
+            createdBy: admin._id
         });
         
-        const staff = await User.create({
-            name: 'Mohit',
-            phone: '9876543210',
-            password: 'staff123',
-            role: 'staff'
+        const project2 = await Project.create({
+            project_name: 'Kumar Residence',
+            customer_name: 'Suresh Kumar',
+            customer_phone: '9977665544',
+            site_address: '456, Andheri East, Mumbai',
+            area_sqft: 1800,
+            status: 'Planning',
+            start_date: new Date('2024-03-01'),
+            expected_duration: '5 months',
+            createdBy: admin._id
         });
         
-        const customer = await User.create({
-            name: 'Ajay',
-            phone: '9988776655',
-            password: 'user123',
-            role: 'customer'
+        // Create Project Stages for Project 1
+        const foundationStage = await ProjectStage.create({
+            project_id: project1._id,
+            stage_name: 'Foundation',
+            stage_order: 1,
+            status: 'Completed',
+            start_date: new Date('2024-01-15'),
+            end_date: new Date('2024-02-15'),
+            material_cost: 150000,
+            labor_cost: 50000,
+            total_cost: 200000
         });
         
-        const customer2 = await User.create({
-            name: 'Nikhil',
-            phone: '9977665544',
-            password: 'user123',
-            role: 'customer'
+        const structureStage = await ProjectStage.create({
+            project_id: project1._id,
+            stage_name: 'Structure',
+            stage_order: 2,
+            status: 'In Progress',
+            start_date: new Date('2024-02-16')
+        });
         
-            // Create Material Categories
-            const categories = await MaterialCategory.create([
-                { name: 'Cement', description: 'All types of cement' },
-                { name: 'Steel', description: 'Steel bars and rods' },
-                { name: 'Bricks', description: 'Bricks and blocks' },
-                { name: 'Sand', description: 'Sand and aggregates' },
-                { name: 'Aggregate', description: 'Stone aggregates' },
-                { name: 'Concrete', description: 'Ready mix concrete' },
-                { name: 'Paint', description: 'Paints and coatings' },
-                { name: 'Flooring', description: 'Flooring materials' },
-                { name: 'Electrical', description: 'Electrical materials' },
-                { name: 'Plumbing', description: 'Plumbing materials' }
-            ]);
-            
-            // Get category IDs
-            const cementCat = categories.find(c => c.name === 'Cement');
-            const steelCat = categories.find(c => c.name === 'Steel');
-            const bricksCat = categories.find(c => c.name === 'Bricks');
-            const sandCat = categories.find(c => c.name === 'Sand');
-            const paintCat = categories.find(c => c.name === 'Paint');
-            
-            // Create Materials
-            const materials = await Material.create([
-                { name: 'Portland Cement (OPC 53 Grade)', category_id: cementCat._id, price_per_unit: 380, unit: 'bag' },
-                { name: 'Portland Cement (PPC)', category_id: cementCat._id, price_per_unit: 350, unit: 'bag' },
-                { name: 'White Cement', category_id: cementCat._id, price_per_unit: 520, unit: 'bag' },
-                { name: 'TMT Steel 12mm', category_id: steelCat._id, price_per_unit: 65, unit: 'kg' },
-                { name: 'TMT Steel 16mm', category_id: steelCat._id, price_per_unit: 68, unit: 'kg' },
-                { name: 'TMT Steel 20mm', category_id: steelCat._id, price_per_unit: 70, unit: 'kg' },
-                { name: 'TMT Steel 25mm', category_id: steelCat._id, price_per_unit: 72, unit: 'kg' },
-                { name: 'Red Bricks', category_id: bricksCat._id, price_per_unit: 8, unit: 'piece' },
-                { name: 'AAC Blocks', category_id: bricksCat._id, price_per_unit: 45, unit: 'piece' },
-                { name: 'Fly Ash Bricks', category_id: bricksCat._id, price_per_unit: 6, unit: 'piece' },
-                { name: 'River Sand', category_id: sandCat._id, price_per_unit: 45, unit: 'cft' },
-                { name: 'M Sand', category_id: sandCat._id, price_per_unit: 35, unit: 'cft' },
-                { name: 'Aggregate 20mm', category_id: sandCat._id, price_per_unit: 28, unit: 'cft' },
-                { name: 'Aggregate 10mm', category_id: sandCat._id, price_per_unit: 25, unit: 'cft' },
-                { name: 'Interior Paint (Asian)', category_id: paintCat._id, price_per_unit: 280, unit: 'liter' },
-                { name: 'Exterior Paint (Asian)', category_id: paintCat._id, price_per_unit: 320, unit: 'liter' },
-                { name: 'Enamel Paint', category_id: paintCat._id, price_per_unit: 250, unit: 'liter' }
-            ]);
-            
-            // Create Workers
-            const workers = await Worker.create([
-                { name: 'Mohan Singh', role: 'Mason', daily_wage: 800, phone: '911234567890' },
-                { name: 'Ramesh Kumar', role: 'Mason', daily_wage: 750, phone: '911234567891' },
-                { name: 'Sanjay Sharma', role: 'Carpenter', daily_wage: 700, phone: '911234567892' },
-                { name: 'Kamal Ahmed', role: 'Electrician', daily_wage: 650, phone: '911234567893' },
-                { name: 'Vijay Plumber', role: 'Plumber', daily_wage: 600, phone: '911234567894' },
-                { name: 'Dinesh Kumar', role: 'Helper', daily_wage: 450, phone: '911234567895' },
-                { name: 'Bablu Singh', role: 'Helper', daily_wage: 450, phone: '911234567896' },
-                { name: 'Raj Kumar', role: 'Painter', daily_wage: 550, phone: '911234567897' }
-            ]);
-            
-            // Create Projects
-            const project1 = await Project.create({
-                project_name: 'Sharma Villa',
-                customer_name: 'Amit Patel',
-                area_sqft: 2500,
-                status: 'In Progress',
-                start_date: new Date('2024-01-15'),
-                end_date: new Date('2024-06-30'),
-                createdBy: admin._id
-            });
-            
-            const project2 = await Project.create({
-                project_name: 'Kumar Residence',
-                customer_name: 'Suresh Kumar',
-                area_sqft: 1800,
-                status: 'Planning',
-                start_date: new Date('2024-03-01'),
-                end_date: new Date('2024-08-31'),
-                createdBy: admin._id
-            });
-            
-            const project3 = await Project.create({
-                project_name: 'Gupta Farm House',
-                customer_name: 'Rajesh Gupta',
-                area_sqft: 3500,
-                status: 'Completed',
-                start_date: new Date('2023-06-01'),
-                end_date: new Date('2023-12-31'),
-                createdBy: admin._id
-            });
-            
-            // Add materials to project 1
-            const cement = materials.find(m => m.name.includes('OPC 53'));
-            const steel12 = materials.find(m => m.name.includes('TMT Steel 12mm'));
-            const bricks = materials.find(m => m.name === 'Red Bricks');
-            const sand = materials.find(m => m.name === 'River Sand');
-            
-            await ProjectMaterial.create([
-                { project_id: project1._id, material_id: cement._id, quantity: 150, unit_price: cement.price_per_unit, total_cost: 150 * cement.price_per_unit },
-                { project_id: project1._id, material_id: steel12._id, quantity: 800, unit_price: steel12.price_per_unit, total_cost: 800 * steel12.price_per_unit },
-                { project_id: project1._id, material_id: bricks._id, quantity: 5000, unit_price: bricks.price_per_unit, total_cost: 5000 * bricks.price_per_unit },
-                { project_id: project1._id, material_id: sand._id, quantity: 200, unit_price: sand.price_per_unit, total_cost: 200 * sand.price_per_unit }
-            ]);
-            
-            // Add workers to project 1
-            const mason1 = workers.find(w => w.name === 'Mohan Singh');
-            const mason2 = workers.find(w => w.name === 'Ramesh Kumar');
-            const helper1 = workers.find(w => w.name === 'Dinesh Kumar');
-            
-            await ProjectWorker.create([
-                { project_id: project1._id, worker_id: mason1._id, days: 30, daily_wage: mason1.daily_wage, total_wage: 30 * mason1.daily_wage },
-                { project_id: project1._id, worker_id: mason2._id, days: 25, daily_wage: mason2.daily_wage, total_wage: 25 * mason2.daily_wage },
-                { project_id: project1._id, worker_id: helper1._id, days: 30, daily_wage: helper1.daily_wage, total_wage: 30 * helper1.daily_wage }
-            ]);
-            
-            // Create Quotations
-            await Quotation.create([
-                {
-                    project_id: project1._id,
-                    quotation_number: 'QT-2024-001',
-                    material_cost: 450000,
-                    labor_cost: 180000,
-                    total_cost: 630000,
-                    gst_amount: 113400,
-                    grand_total: 743400,
-                    status: 'Approved'
-                },
-                {
-                    project_id: project2._id,
-                    quotation_number: 'QT-2024-002',
-                    material_cost: 320000,
-                    labor_cost: 120000,
-                    total_cost: 440000,
-                    gst_amount: 79200,
-                    grand_total: 519200,
-                    status: 'Pending'
-                }
-            ]);
-            
-            // Create App Settings
-            await AppSetting.create([
-                { key: 'gst_rate', value: 18 },
-                { key: 'company_name', value: 'Builder Site Construction' },
-                { key: 'company_address', value: '123 Construction Road, Mumbai-400001' },
-                { key: 'company_phone', value: '+91-1234567890' },
-                { key: 'company_email', value: 'info@buildersite.com' }
-            ]);
-            
-            res.json({ 
-                message: 'Complete seed data created successfully',
-                users: { admin: '1234567890 / admin123', staff: '9876543210 / staff123', customer: '9988776655 / user123' },
-                materials: materials.length,
-                workers: workers.length,
-                projects: 3,
-                quotations: 2
-            });
-        } else {
-            res.json({ message: 'Seed data already exists' });
-        }
+        // Create Payments for Project 1
+        await Payment.create([
+            { project_id: project1._id, milestone_name: 'Advance Payment', amount: 200000, paid_amount: 200000, status: 'Paid', payment_date: new Date('2024-01-10') },
+            { project_id: project1._id, milestone_name: 'Foundation Complete', amount: 200000, paid_amount: 150000, status: 'Partial', due_date: new Date('2024-02-20') },
+            { project_id: project1._id, milestone_name: 'Structure Complete', amount: 300000, status: 'Pending', due_date: new Date('2024-04-01') }
+        ]);
+        
+        // Create Quotation with Version
+        const quotation = await Quotation.create({
+            project_id: project1._id,
+            quotation_number: 'QT-2024-001',
+            material_cost: 500000,
+            labor_cost: 200000,
+            total_cost: 700000,
+            gst_amount: 126000,
+            grand_total: 826000,
+            status: 'Approved'
+        });
+        
+        // Create Quotation Versions
+        await QuotationVersion.create([
+            { project_id: project1._id, version: 1, version_name: 'v1', material_cost: 500000, labor_cost: 200000, total_cost: 700000, gst_amount: 126000, grand_total: 826000, status: 'Approved', approval_status: 'Approved' },
+            { project_id: project1._id, version: 2, version_name: 'v2', material_cost: 550000, labor_cost: 220000, total_cost: 770000, gst_amount: 138600, grand_total: 908600, status: 'Revised', approval_status: 'Pending' }
+        ]);
+        
+        // Create App Settings
+        await AppSetting.create([
+            { key: 'gst_rate', value: 18 },
+            { key: 'company_name', value: 'Builder Site Construction' },
+            { key: 'company_address', value: '123 Construction Road, Mumbai-400001' },
+            { key: 'company_phone', value: '+91-1234567890' },
+            { key: 'company_email', value: 'info@buildersite.com' }
+        ]);
+        
+        res.json({ 
+            success: true,
+            message: 'Complete seed data created!',
+            users: { admin: '1234567890/admin123', staff: '9876543210/staff123', customer: '9988776655/user123' },
+            stats: { materials: materials.length, workers: workers.length, stages: stages.length, projects: 2, payments: 3 }
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1025,52 +928,6 @@ app.post('/api/seed', async (req, res) => {
 
 // ==================== START SERVER ====================
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-    const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
-    console.log('╔════════════════════════════════════════════════════════════╗');
-    console.log('║           Builder Site API Server Started                ║');
-    console.log('╠════════════════════════════════════════════════════════════╣');
-    console.log(`║  Server:    ${vercelUrl}                        ║`);
-    console.log(`║  Health:    ${vercelUrl}/health                    ║`);
-    console.log(`║  API Base:  ${vercelUrl}/api                      ║`);
-    console.log(`║  Environment: ${process.env.NODE_ENV || 'development'}                            ║`);
-    console.log('╚════════════════════════════════════════════════════════════╝');
-});
-
-// Graceful Shutdown
-const gracefulShutdown = async (signal) => {
-    console.log(`\n${signal} received. Starting graceful shutdown...`);
-    
-    server.close(async () => {
-        console.log('HTTP server closed.');
-        
-        try {
-            await mongoose.connection.close();
-            console.log('MongoDB connection closed.');
-            process.exit(0);
-        } catch (err) {
-            console.error('Error during shutdown:', err);
-            process.exit(1);
-        }
-    });
-    
-    // Force shutdown after 10 seconds
-    setTimeout(() => {
-        console.error('Forced shutdown after timeout.');
-        process.exit(1);
-    }, 10000);
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Unhandled Promise Rejections
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// Uncaught Exceptions
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
-    process.exit(1);
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
