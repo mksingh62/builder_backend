@@ -694,38 +694,58 @@ app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, r
 
 app.post('/api/seed', async (req, res) => {
     try {
+        const force = req.body.force === true;
+        
         // Check if admin exists
         const adminExists = await User.findOne({ phone: '1234567890' });
-        if (!adminExists) {
-            // Create Users
-            const admin = await User.create({
-                name: 'Admin',
-                phone: '1234567890',
-                password: 'admin123',
-                role: 'admin'
-            });
-            
-            const staff = await User.create({
-                name: 'Mohit',
-                phone: '9876543210',
-                password: 'staff123',
-                role: 'staff'
-            });
-            
-            const customer = await User.create({
-                name: 'Ajay',
-                phone: '9988776655',
-                password: 'user123',
-                role: 'customer'
-            });
-            
-            const customer2 = await User.create({
-                name: 'Nikhil',
-                phone: '9977665544',
-                password: 'user123',
-                role: 'customer'
-            });
-            
+        
+        if (adminExists && !force) {
+            return res.json({ message: 'Seed data already exists. Use force=true to re-seed.' });
+        }
+        
+        // Clear existing data if force=true
+        if (force) {
+            await User.deleteMany({});
+            await MaterialCategory.deleteMany({});
+            await Material.deleteMany({});
+            await Worker.deleteMany({});
+            await Project.deleteMany({});
+            await ProjectMaterial.deleteMany({});
+            await ProjectWorker.deleteMany({});
+            await Quotation.deleteMany({});
+            await QuotationMaterial.deleteMany({});
+            await QuotationWorker.deleteMany({});
+            await AppSetting.deleteMany({});
+        }
+        
+        // Create Users
+        const admin = await User.create({
+            name: 'Admin',
+            phone: '1234567890',
+            password: 'admin123',
+            role: 'admin'
+        });
+        
+        const staff = await User.create({
+            name: 'Mohit',
+            phone: '9876543210',
+            password: 'staff123',
+            role: 'staff'
+        });
+        
+        const customer = await User.create({
+            name: 'Ajay',
+            phone: '9988776655',
+            password: 'user123',
+            role: 'customer'
+        });
+        
+        const customer2 = await User.create({
+            name: 'Nikhil',
+            phone: '9977665544',
+            password: 'user123',
+            role: 'customer'
+        
             // Create Material Categories
             const categories = await MaterialCategory.create([
                 { name: 'Cement', description: 'All types of cement' },
