@@ -12,7 +12,6 @@ const app = express();
 // Security Middleware
 app.use(helmet());
 
-
 // CORS Configuration
 const corsOptions = {
     origin: process.env.CORS_ORIGIN || '*',
@@ -698,14 +697,37 @@ app.post('/api/seed', async (req, res) => {
         // Check if admin exists
         const adminExists = await User.findOne({ phone: '1234567890' });
         if (!adminExists) {
-            await User.create({
+            // Create Users
+            const admin = await User.create({
                 name: 'Admin',
                 phone: '1234567890',
                 password: 'admin123',
                 role: 'admin'
             });
             
-            await MaterialCategory.create([
+            const staff = await User.create({
+                name: 'Mohit',
+                phone: '9876543210',
+                password: 'staff123',
+                role: 'staff'
+            });
+            
+            const customer = await User.create({
+                name: 'Ajay',
+                phone: '9988776655',
+                password: 'user123',
+                role: 'customer'
+            });
+            
+            const customer2 = await User.create({
+                name: 'Nikhil',
+                phone: '9977665544',
+                password: 'user123',
+                role: 'customer'
+            });
+            
+            // Create Material Categories
+            const categories = await MaterialCategory.create([
                 { name: 'Cement', description: 'All types of cement' },
                 { name: 'Steel', description: 'Steel bars and rods' },
                 { name: 'Bricks', description: 'Bricks and blocks' },
@@ -718,7 +740,142 @@ app.post('/api/seed', async (req, res) => {
                 { name: 'Plumbing', description: 'Plumbing materials' }
             ]);
             
-            res.json({ message: 'Seed data created successfully' });
+            // Get category IDs
+            const cementCat = categories.find(c => c.name === 'Cement');
+            const steelCat = categories.find(c => c.name === 'Steel');
+            const bricksCat = categories.find(c => c.name === 'Bricks');
+            const sandCat = categories.find(c => c.name === 'Sand');
+            const paintCat = categories.find(c => c.name === 'Paint');
+            
+            // Create Materials
+            const materials = await Material.create([
+                { name: 'Portland Cement (OPC 53 Grade)', category_id: cementCat._id, price_per_unit: 380, unit: 'bag' },
+                { name: 'Portland Cement (PPC)', category_id: cementCat._id, price_per_unit: 350, unit: 'bag' },
+                { name: 'White Cement', category_id: cementCat._id, price_per_unit: 520, unit: 'bag' },
+                { name: 'TMT Steel 12mm', category_id: steelCat._id, price_per_unit: 65, unit: 'kg' },
+                { name: 'TMT Steel 16mm', category_id: steelCat._id, price_per_unit: 68, unit: 'kg' },
+                { name: 'TMT Steel 20mm', category_id: steelCat._id, price_per_unit: 70, unit: 'kg' },
+                { name: 'TMT Steel 25mm', category_id: steelCat._id, price_per_unit: 72, unit: 'kg' },
+                { name: 'Red Bricks', category_id: bricksCat._id, price_per_unit: 8, unit: 'piece' },
+                { name: 'AAC Blocks', category_id: bricksCat._id, price_per_unit: 45, unit: 'piece' },
+                { name: 'Fly Ash Bricks', category_id: bricksCat._id, price_per_unit: 6, unit: 'piece' },
+                { name: 'River Sand', category_id: sandCat._id, price_per_unit: 45, unit: 'cft' },
+                { name: 'M Sand', category_id: sandCat._id, price_per_unit: 35, unit: 'cft' },
+                { name: 'Aggregate 20mm', category_id: sandCat._id, price_per_unit: 28, unit: 'cft' },
+                { name: 'Aggregate 10mm', category_id: sandCat._id, price_per_unit: 25, unit: 'cft' },
+                { name: 'Interior Paint (Asian)', category_id: paintCat._id, price_per_unit: 280, unit: 'liter' },
+                { name: 'Exterior Paint (Asian)', category_id: paintCat._id, price_per_unit: 320, unit: 'liter' },
+                { name: 'Enamel Paint', category_id: paintCat._id, price_per_unit: 250, unit: 'liter' }
+            ]);
+            
+            // Create Workers
+            const workers = await Worker.create([
+                { name: 'Mohan Singh', role: 'Mason', daily_wage: 800, phone: '911234567890' },
+                { name: 'Ramesh Kumar', role: 'Mason', daily_wage: 750, phone: '911234567891' },
+                { name: 'Sanjay Sharma', role: 'Carpenter', daily_wage: 700, phone: '911234567892' },
+                { name: 'Kamal Ahmed', role: 'Electrician', daily_wage: 650, phone: '911234567893' },
+                { name: 'Vijay Plumber', role: 'Plumber', daily_wage: 600, phone: '911234567894' },
+                { name: 'Dinesh Kumar', role: 'Helper', daily_wage: 450, phone: '911234567895' },
+                { name: 'Bablu Singh', role: 'Helper', daily_wage: 450, phone: '911234567896' },
+                { name: 'Raj Kumar', role: 'Painter', daily_wage: 550, phone: '911234567897' }
+            ]);
+            
+            // Create Projects
+            const project1 = await Project.create({
+                project_name: 'Sharma Villa',
+                customer_name: 'Amit Patel',
+                area_sqft: 2500,
+                status: 'In Progress',
+                start_date: new Date('2024-01-15'),
+                end_date: new Date('2024-06-30'),
+                createdBy: admin._id
+            });
+            
+            const project2 = await Project.create({
+                project_name: 'Kumar Residence',
+                customer_name: 'Suresh Kumar',
+                area_sqft: 1800,
+                status: 'Planning',
+                start_date: new Date('2024-03-01'),
+                end_date: new Date('2024-08-31'),
+                createdBy: admin._id
+            });
+            
+            const project3 = await Project.create({
+                project_name: 'Gupta Farm House',
+                customer_name: 'Rajesh Gupta',
+                area_sqft: 3500,
+                status: 'Completed',
+                start_date: new Date('2023-06-01'),
+                end_date: new Date('2023-12-31'),
+                createdBy: admin._id
+            });
+            
+            // Add materials to project 1
+            const cement = materials.find(m => m.name.includes('OPC 53'));
+            const steel12 = materials.find(m => m.name.includes('TMT Steel 12mm'));
+            const bricks = materials.find(m => m.name === 'Red Bricks');
+            const sand = materials.find(m => m.name === 'River Sand');
+            
+            await ProjectMaterial.create([
+                { project_id: project1._id, material_id: cement._id, quantity: 150, unit_price: cement.price_per_unit, total_cost: 150 * cement.price_per_unit },
+                { project_id: project1._id, material_id: steel12._id, quantity: 800, unit_price: steel12.price_per_unit, total_cost: 800 * steel12.price_per_unit },
+                { project_id: project1._id, material_id: bricks._id, quantity: 5000, unit_price: bricks.price_per_unit, total_cost: 5000 * bricks.price_per_unit },
+                { project_id: project1._id, material_id: sand._id, quantity: 200, unit_price: sand.price_per_unit, total_cost: 200 * sand.price_per_unit }
+            ]);
+            
+            // Add workers to project 1
+            const mason1 = workers.find(w => w.name === 'Mohan Singh');
+            const mason2 = workers.find(w => w.name === 'Ramesh Kumar');
+            const helper1 = workers.find(w => w.name === 'Dinesh Kumar');
+            
+            await ProjectWorker.create([
+                { project_id: project1._id, worker_id: mason1._id, days: 30, daily_wage: mason1.daily_wage, total_wage: 30 * mason1.daily_wage },
+                { project_id: project1._id, worker_id: mason2._id, days: 25, daily_wage: mason2.daily_wage, total_wage: 25 * mason2.daily_wage },
+                { project_id: project1._id, worker_id: helper1._id, days: 30, daily_wage: helper1.daily_wage, total_wage: 30 * helper1.daily_wage }
+            ]);
+            
+            // Create Quotations
+            await Quotation.create([
+                {
+                    project_id: project1._id,
+                    quotation_number: 'QT-2024-001',
+                    material_cost: 450000,
+                    labor_cost: 180000,
+                    total_cost: 630000,
+                    gst_amount: 113400,
+                    grand_total: 743400,
+                    status: 'Approved'
+                },
+                {
+                    project_id: project2._id,
+                    quotation_number: 'QT-2024-002',
+                    material_cost: 320000,
+                    labor_cost: 120000,
+                    total_cost: 440000,
+                    gst_amount: 79200,
+                    grand_total: 519200,
+                    status: 'Pending'
+                }
+            ]);
+            
+            // Create App Settings
+            await AppSetting.create([
+                { key: 'gst_rate', value: 18 },
+                { key: 'company_name', value: 'Builder Site Construction' },
+                { key: 'company_address', value: '123 Construction Road, Mumbai-400001' },
+                { key: 'company_phone', value: '+91-1234567890' },
+                { key: 'company_email', value: 'info@buildersite.com' }
+            ]);
+            
+            res.json({ 
+                message: 'Complete seed data created successfully',
+                users: { admin: '1234567890 / admin123', staff: '9876543210 / staff123', customer: '9988776655 / user123' },
+                materials: materials.length,
+                workers: workers.length,
+                projects: 3,
+                quotations: 2
+            });
         } else {
             res.json({ message: 'Seed data already exists' });
         }
@@ -778,4 +935,3 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
     process.exit(1);
 });
-
