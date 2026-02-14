@@ -178,6 +178,125 @@ const quotationWorkerSchema = new mongoose.Schema({
 });
 const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
 
+// ==================== NEW ADVANCED MODELS ====================
+
+// Construction Stage Schema
+const stageSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: String,
+    order: { type: Number, default: 0 }
+});
+const Stage = mongoose.model('Stage', stageSchema);
+
+// Project Stage Schema (stages for each project)
+const projectStageSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Stage' },
+    stage_name: String,
+    status: { type: String, enum: ['Pending', 'In Progress', 'Completed'], default: 'Pending' },
+    start_date: Date,
+    end_date: Date,
+    material_cost: { type: Number, default: 0 },
+    labor_cost: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now }
+});
+const ProjectStage = mongoose.model('ProjectStage', projectStageSchema);
+
+// Project Stage Material Schema
+const projectStageMaterialSchema = new mongoose.Schema({
+    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+    material_name: String,
+    quantity: { type: Number, default: 0 },
+    unit_price: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 }
+});
+const ProjectStageMaterial = mongoose.model('ProjectStageMaterial', projectStageMaterialSchema);
+
+// Project Stage Worker Schema
+const projectStageWorkerSchema = new mongoose.Schema({
+    project_stage_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ProjectStage' },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker' },
+    worker_name: String,
+    worker_role: String,
+    days: { type: Number, default: 0 },
+    daily_wage: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 }
+});
+const ProjectStageWorker = mongoose.model('ProjectStageWorker', projectStageWorkerSchema);
+
+// Daily Work Entry Schema
+const dailyEntrySchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    date: { type: Date, default: Date.now },
+    workers_present: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Worker' }],
+    materials_used: [{
+        material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+        material_name: String,
+        quantity: Number,
+        cost: Number
+    }],
+    extra_expenses: { type: Number, default: 0 },
+    expense_description: String,
+    total_daily_cost: { type: Number, default: 0 },
+    notes: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const DailyEntry = mongoose.model('DailyEntry', dailyEntrySchema);
+
+// Payment Schema
+const paymentSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
+    payment_number: { type: Number, default: 1 },
+    milestone_name: String,
+    amount: { type: Number, required: true },
+    paid_amount: { type: Number, default: 0 },
+    due_date: Date,
+    status: { type: String, enum: ['Pending', 'Partial', 'Paid', 'Overdue'], default: 'Pending' },
+    payment_date: Date,
+    payment_mode: String,
+    transaction_id: String,
+    notes: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const Payment = mongoose.model('Payment', paymentSchema);
+
+// Document Schema
+const documentSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    document_type: { type: String, enum: ['Site Photo', 'Bill', 'Invoice', 'Material Proof', 'Contract', 'Other'], default: 'Other' },
+    file_name: String,
+    file_url: String,
+    description: String,
+    uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+const Document = mongoose.model('Document', documentSchema);
+
+// Quotation Version Schema (for version management)
+const quotationVersionSchema = new mongoose.Schema({
+    quotation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    version: { type: Number, default: 1 },
+    version_name: { type: String, default: 'v1' },
+    material_cost: { type: Number, default: 0 },
+    labor_cost: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 },
+    gst_amount: { type: Number, default: 0 },
+    grand_total: { type: Number, default: 0 },
+    status: { type: String, enum: ['Draft', 'Sent', 'Approved', 'Rejected', 'Revised'], default: 'Draft' },
+    approval_status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Modification Requested'], default: 'Pending' },
+    approval_date: Date,
+    approved_by: String,
+    notes: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const QuotationVersion = mongoose.model('QuotationVersion', quotationVersionSchema);
+
 // ==================== MIDDLEWARE ====================
 
 const authenticateToken = (req, res, next) => {
