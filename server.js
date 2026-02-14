@@ -198,8 +198,8 @@ const authenticateToken = (req, res, next) => {
 };
 
 const requireAdmin = (req, res, next) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
+    if (req.user.role !== 'admin' && req.user.role !== 'staff') {
+        return res.status(403).json({ error: 'Admin or Staff access required' });
     }
     next();
 };
