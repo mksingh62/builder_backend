@@ -3,11 +3,14 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const multer = require('multer');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'house_construction_secret_key_2024';
@@ -25,6 +28,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     role: { type: String, enum: ['admin', 'staff', 'customer'], default: 'customer' },
+    profilePhoto: String,
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
@@ -240,16 +244,45 @@ const quotationWorkerSchema = new mongoose.Schema({
 });
 const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
 
+// ==================== MULTER CONFIGURATION ====================
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = './uploads/profiles/';
+        const fs = require('fs');
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, req.user.id + '-' + Date.now() + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+        const filetypes = /jpeg|jpg|png/;
+        const mimetype = filetypes.test(file.mimetype);
+        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+        if (mimetype && extname) {
+            return cb(null, true);
+        }
+        cb(new Error('Only images (jpg, jpeg, png) are allowed!'));
+    }
+});
+
 // ==================== MIDDLEWARE ====================
 
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-    
+
     if (!token) {
         return res.status(401).json({ error: 'Access token required' });
     }
-    
+
     jwt.verify(token, JWT_SECRET, (err, user) => {
         if (err) {
             return res.status(403).json({ error: 'Invalid or expired token' });
@@ -291,7 +324,8 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user._id,
                 name: user.name,
                 phone: user.phone,
-                role: user.role
+                role: user.role,
+                profilePhoto: user.profilePhoto
             }
         });
     } catch (err) {
@@ -334,6 +368,26 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
             { new: true }
         ).select('-password');
         res.json({ success: true, user });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Update profile photo
+app.put('/api/auth/profile/photo', authenticateToken, upload.single('photo'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Please upload an image' });
+        }
+
+        const photoUrl = `/uploads/profiles/${req.file.filename}`;
+        const user = await User.findByIdAndUpdate(
+            req.user.id,
+            { profilePhoto: photoUrl },
+            { new: true }
+        ).select('-password');
+
+        res.json({ success: true, profilePhoto: photoUrl, user });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -575,20 +629,20 @@ app.get('/api/projects/:id/costing', authenticateToken, async (req, res) => {
     try {
         const materials = await ProjectMaterial.find({ project_id: req.params.id }).populate('material_id', 'name unit price_per_unit');
         const workers = await ProjectWorker.find({ project_id: req.params.id }).populate('worker_id', 'name role daily_wage');
-        
+
         let material_cost = 0;
         let labor_cost = 0;
-        
+
         materials.forEach(m => {
             material_cost += m.total_cost || 0;
         });
-        
+
         workers.forEach(w => {
             labor_cost += w.total_wage || 0;
         });
-        
+
         const total_cost = material_cost + labor_cost;
-        
+
         res.json({
             materials,
             workers,
@@ -618,10 +672,10 @@ app.get('/api/quotations/:id', async (req, res) => {
         if (!quotation) {
             return res.status(404).json({ error: 'Quotation not found' });
         }
-        
+
         const materials = await QuotationMaterial.find({ quotation_id: req.params.id }).populate('material_id', 'name unit');
         const workers = await QuotationWorker.find({ quotation_id: req.params.id }).populate('worker_id', 'name role');
-        
+
         res.json({
             ...quotation.toObject(),
             materials,
@@ -634,28 +688,28 @@ app.get('/api/quotations/:id', async (req, res) => {
 
 app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
     const { project_id } = req.body;
-    
+
     try {
         const materials = await ProjectMaterial.find({ project_id }).populate('material_id', 'name unit price_per_unit');
         const workers = await ProjectWorker.find({ project_id }).populate('worker_id', 'name role daily_wage');
-        
+
         let material_cost = 0;
         let labor_cost = 0;
-        
+
         materials.forEach(m => {
             material_cost += m.total_cost || 0;
         });
-        
+
         workers.forEach(w => {
             labor_cost += w.total_wage || 0;
         });
-        
+
         const total_cost = material_cost + labor_cost;
         const gst_amount = total_cost * 0.18;
         const grand_total = total_cost + gst_amount;
-        
+
         const quotation_number = 'QTN-' + Date.now().toString().slice(-8);
-        
+
         const newQuotation = new Quotation({
             project_id,
             quotation_number,
@@ -666,9 +720,9 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
             grand_total
         });
         await newQuotation.save();
-        
+
         const quotation_id = newQuotation._id;
-        
+
         for (const m of materials) {
             const qm = new QuotationMaterial({
                 quotation_id,
@@ -679,7 +733,7 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
             });
             await qm.save();
         }
-        
+
         for (const w of workers) {
             const qw = new QuotationWorker({
                 quotation_id,
@@ -690,7 +744,7 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
             });
             await qw.save();
         }
-        
+
         res.json({
             id: quotation_id,
             quotation_number,
@@ -774,13 +828,13 @@ app.post('/api/seed', async (req, res) => {
         await Document.deleteMany({});
         await QuotationVersion.deleteMany({});
         await AppSetting.deleteMany({});
-        
+
         // Create Users
         const admin = await User.create({ name: 'Admin', phone: '1234567890', password: 'admin123', role: 'admin' });
         const staff = await User.create({ name: 'Rahul Sharma', phone: '9876543210', password: 'staff123', role: 'staff' });
         const customer = await User.create({ name: 'Amit Patel', phone: '9988776655', password: 'user123', role: 'customer' });
         const customer2 = await User.create({ name: 'Suresh Kumar', phone: '9977665544', password: 'user123', role: 'customer' });
-        
+
         // Create Material Categories
         const categories = await MaterialCategory.create([
             { name: 'Cement', description: 'All types of cement' },
@@ -793,14 +847,14 @@ app.post('/api/seed', async (req, res) => {
             { name: 'Electrical', description: 'Electrical materials' },
             { name: 'Plumbing', description: 'Plumbing materials' }
         ]);
-        
+
         // Create Materials
         const cementCat = categories.find(c => c.name === 'Cement');
         const steelCat = categories.find(c => c.name === 'Steel');
         const bricksCat = categories.find(c => c.name === 'Bricks');
         const sandCat = categories.find(c => c.name === 'Sand');
         const paintCat = categories.find(c => c.name === 'Paint');
-        
+
         const materials = await Material.create([
             { name: 'OPC 53 Grade Cement', category_id: cementCat._id, price_per_unit: 380, unit: 'bag' },
             { name: 'PPC Cement', category_id: cementCat._id, price_per_unit: 350, unit: 'bag' },
@@ -813,7 +867,7 @@ app.post('/api/seed', async (req, res) => {
             { name: 'Interior Paint', category_id: paintCat._id, price_per_unit: 280, unit: 'liter' },
             { name: 'Exterior Paint', category_id: paintCat._id, price_per_unit: 320, unit: 'liter' }
         ]);
-        
+
         // Create Workers
         const workers = await Worker.create([
             { name: 'Mohan Singh', role: 'Mason', daily_wage: 800 },
@@ -824,7 +878,7 @@ app.post('/api/seed', async (req, res) => {
             { name: 'Dinesh Kumar', role: 'Helper', daily_wage: 450 },
             { name: 'Raj Kumar', role: 'Painter', daily_wage: 550 }
         ]);
-        
+
         // Create Construction Stages Master
         const stages = await StageMaster.create([
             { name: 'Foundation', description: 'Foundation work', order: 1 },
@@ -834,7 +888,7 @@ app.post('/api/seed', async (req, res) => {
             { name: 'Flooring', description: 'Floor laying', order: 5 },
             { name: 'Finishing', description: 'Paint and final work', order: 6 }
         ]);
-        
+
         // Create Projects
         const project1 = await Project.create({
             project_name: 'Sharma Villa',
@@ -847,7 +901,7 @@ app.post('/api/seed', async (req, res) => {
             expected_duration: '6 months',
             createdBy: admin._id
         });
-        
+
         const project2 = await Project.create({
             project_name: 'Kumar Residence',
             customer_name: 'Suresh Kumar',
@@ -859,7 +913,7 @@ app.post('/api/seed', async (req, res) => {
             expected_duration: '5 months',
             createdBy: admin._id
         });
-        
+
         // Create Project Stages for Project 1
         const foundationStage = await ProjectStage.create({
             project_id: project1._id,
@@ -872,7 +926,7 @@ app.post('/api/seed', async (req, res) => {
             labor_cost: 50000,
             total_cost: 200000
         });
-        
+
         const structureStage = await ProjectStage.create({
             project_id: project1._id,
             stage_name: 'Structure',
@@ -880,14 +934,14 @@ app.post('/api/seed', async (req, res) => {
             status: 'In Progress',
             start_date: new Date('2024-02-16')
         });
-        
+
         // Create Payments for Project 1
         await Payment.create([
             { project_id: project1._id, milestone_name: 'Advance Payment', amount: 200000, paid_amount: 200000, status: 'Paid', payment_date: new Date('2024-01-10') },
             { project_id: project1._id, milestone_name: 'Foundation Complete', amount: 200000, paid_amount: 150000, status: 'Partial', due_date: new Date('2024-02-20') },
             { project_id: project1._id, milestone_name: 'Structure Complete', amount: 300000, status: 'Pending', due_date: new Date('2024-04-01') }
         ]);
-        
+
         // Create Quotation with Version
         const quotation = await Quotation.create({
             project_id: project1._id,
@@ -899,13 +953,13 @@ app.post('/api/seed', async (req, res) => {
             grand_total: 826000,
             status: 'Approved'
         });
-        
+
         // Create Quotation Versions
         await QuotationVersion.create([
             { project_id: project1._id, version: 1, version_name: 'v1', material_cost: 500000, labor_cost: 200000, total_cost: 700000, gst_amount: 126000, grand_total: 826000, status: 'Approved', approval_status: 'Approved' },
             { project_id: project1._id, version: 2, version_name: 'v2', material_cost: 550000, labor_cost: 220000, total_cost: 770000, gst_amount: 138600, grand_total: 908600, status: 'Revised', approval_status: 'Pending' }
         ]);
-        
+
         // Create App Settings
         await AppSetting.create([
             { key: 'gst_rate', value: 18 },
@@ -914,8 +968,8 @@ app.post('/api/seed', async (req, res) => {
             { key: 'company_phone', value: '+91-1234567890' },
             { key: 'company_email', value: 'info@buildersite.com' }
         ]);
-        
-        res.json({ 
+
+        res.json({
             success: true,
             message: 'Complete seed data created!',
             users: { admin: '1234567890/admin123', staff: '9876543210/staff123', customer: '9988776655/user123' },
@@ -993,8 +1047,8 @@ app.post('/api/projects/:id/stages', authenticateToken, async (req, res) => {
 app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (req, res) => {
     try {
         const projectStage = await ProjectStage.findByIdAndUpdate(
-            req.params.stageId, 
-            req.body, 
+            req.params.stageId,
+            req.body,
             { new: true }
         );
         res.json(projectStage);
@@ -1020,18 +1074,18 @@ app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res) 
             project_id: req.params.id,
             ...req.body
         });
-        
+
         // Calculate total daily cost
         let totalCost = dailyEntry.extra_expenses || 0;
-        
+
         // Add material costs
         for (const material of dailyEntry.materials_used) {
             totalCost += material.cost || 0;
         }
-        
+
         dailyEntry.total_daily_cost = totalCost;
         await dailyEntry.save();
-        
+
         res.status(201).json(dailyEntry);
     } catch (err) {
         res.status(500).json({ error: err.message });
