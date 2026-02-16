@@ -245,19 +245,7 @@ const quotationWorkerSchema = new mongoose.Schema({
 const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
 
 // ==================== MULTER CONFIGURATION ====================
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dir = './uploads/profiles/';
-        const fs = require('fs');
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-        }
-        cb(null, dir);
-    },
-    filename: (req, file, cb) => {
-        cb(null, req.user.id + '-' + Date.now() + path.extname(file.originalname));
-    }
-});
+const storage = multer.memoryStorage(); // Switch to memory storage for Vercel compatibility
 
 const upload = multer({
     storage: storage,
@@ -380,8 +368,7 @@ app.put('/api/auth/profile/photo', authenticateToken, (req, res) => {
         if (err instanceof multer.MulterError) {
             return res.status(400).json({ error: `Multer error: ${err.message}` });
         } else if (err) {
-            // This will likely catch the "fs" error on Vercel
-            return res.status(500).json({ error: `Upload system error: ${err.message}. Note: Vercel does not support local disk storage.` });
+            return res.status(500).json({ error: `Upload error: ${err.message}` });
         }
 
         try {
@@ -389,14 +376,16 @@ app.put('/api/auth/profile/photo', authenticateToken, (req, res) => {
                 return res.status(400).json({ error: 'Please upload an image' });
             }
 
-            const photoUrl = `/uploads/profiles/${req.file.filename}`;
+            // Convert buffer to Base64 data URL
+            const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
             const user = await User.findByIdAndUpdate(
                 req.user.id,
-                { profilePhoto: photoUrl },
+                { profilePhoto: base64Image },
                 { new: true }
             ).select('-password');
 
-            res.json({ success: true, profilePhoto: photoUrl, user });
+            res.json({ success: true, profilePhoto: base64Image, user });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
