@@ -9,7 +9,8 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const PORT = process.env.PORT || 5000;
@@ -293,19 +294,28 @@ const requireAdmin = (req, res, next) => {
 // Login
 app.post('/api/auth/login', async (req, res) => {
     const { phone, password } = req.body;
+    console.log('Login attempt for:', phone);
+
     try {
         const user = await User.findOne({ phone });
         if (!user) {
+            console.log('Login failed: User not found -', phone);
             return res.status(401).json({ success: false, message: 'User not found' });
         }
+
         if (user.password !== password) {
+            console.log('Login failed: Invalid password for -', phone);
             return res.status(401).json({ success: false, message: 'Invalid password' });
         }
+
         const token = jwt.sign(
             { id: user._id, phone: user.phone, role: user.role },
             JWT_SECRET,
             { expiresIn: '24h' }
         );
+
+        console.log('Login successful for:', phone, 'Role:', user.role);
+
         res.json({
             success: true,
             token,
@@ -318,6 +328,7 @@ app.post('/api/auth/login', async (req, res) => {
             }
         });
     } catch (err) {
+        console.error('Login Error:', err);
         res.status(500).json({ error: err.message });
     }
 });
