@@ -374,23 +374,32 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
 });
 
 // Update profile photo
-app.put('/api/auth/profile/photo', authenticateToken, upload.single('photo'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Please upload an image' });
+app.put('/api/auth/profile/photo', authenticateToken, (req, res) => {
+    upload.single('photo')(req, res, async (err) => {
+        if (err instanceof multer.MulterError) {
+            return res.status(400).json({ error: `Multer error: ${err.message}` });
+        } else if (err) {
+            // This will likely catch the "fs" error on Vercel
+            return res.status(500).json({ error: `Upload system error: ${err.message}. Note: Vercel does not support local disk storage.` });
         }
 
-        const photoUrl = `/uploads/profiles/${req.file.filename}`;
-        const user = await User.findByIdAndUpdate(
-            req.user.id,
-            { profilePhoto: photoUrl },
-            { new: true }
-        ).select('-password');
+        try {
+            if (!req.file) {
+                return res.status(400).json({ error: 'Please upload an image' });
+            }
 
-        res.json({ success: true, profilePhoto: photoUrl, user });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+            const photoUrl = `/uploads/profiles/${req.file.filename}`;
+            const user = await User.findByIdAndUpdate(
+                req.user.id,
+                { profilePhoto: photoUrl },
+                { new: true }
+            ).select('-password');
+
+            res.json({ success: true, profilePhoto: photoUrl, user });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
 });
 
 // Change password
