@@ -582,17 +582,30 @@ app.get('/api/projects/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/projects', authenticateToken, async (req, res) => {
-    const { project_name, customer_name, area_sqft, status } = req.body;
+    const { project_name, customer_name, site_address, area_sqft, status } = req.body;
     try {
         const newProject = new Project({
             project_name,
             customer_name,
+            site_address,
             area_sqft,
             status: status || 'Planning',
             createdBy: req.user.id
         });
         await newProject.save();
         res.json(newProject);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/projects/:id', authenticateToken, async (req, res) => {
+    try {
+        const project = await Project.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        res.json(project);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
