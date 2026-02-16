@@ -323,8 +323,8 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user._id,
                 name: user.name,
                 phone: user.phone,
-                role: user.role,
-                profilePhoto: user.profilePhoto
+                role: user.role
+                // profilePhoto removed to keep login payload small
             }
         });
     } catch (err) {
