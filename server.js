@@ -1108,6 +1108,7 @@ app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (re
 app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res) => {
     try {
         const dailyEntries = await DailyEntry.find({ project_id: req.params.id })
+            .populate('workers_present', 'name role')
             .sort({ date: -1 });
         res.json(dailyEntries);
     } catch (err) {
