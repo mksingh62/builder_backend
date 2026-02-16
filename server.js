@@ -47,6 +47,8 @@ const materialSchema = new mongoose.Schema({
     category_id: { type: mongoose.Schema.Types.ObjectId, ref: 'MaterialCategory' },
     price_per_unit: { type: Number, required: true },
     unit: { type: String, default: 'unit' },
+    current_stock: { type: Number, default: 0 },
+    total_stock: { type: Number, default: 100 },
     createdAt: { type: Date, default: Date.now }
 });
 const Material = mongoose.model('Material', materialSchema);
@@ -56,7 +58,8 @@ const workerSchema = new mongoose.Schema({
     name: { type: String, required: true },
     role: { type: String, default: 'Worker' },
     daily_wage: { type: Number, required: true },
-    phone: String,
+    phone_number: String,
+    location: String,
     createdAt: { type: Date, default: Date.now }
 });
 const Worker = mongoose.model('Worker', workerSchema);
