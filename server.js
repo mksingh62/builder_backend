@@ -538,8 +538,32 @@ app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res)
 
 app.get('/api/projects', authenticateToken, async (req, res) => {
     try {
-        const projects = await Project.find().sort({ createdAt: -1 });
-        res.json(projects);
+        const query = req.user.role === 'customer' ? { customer_phone: req.user.phone } : {};
+        const projects = await Project.find(query).sort({ createdAt: -1 });
+
+        // Add stage progress to each project
+        const projectsWithProgress = await Promise.all(projects.map(async (project) => {
+            const stages = await ProjectStage.find({ project_id: project._id }).sort({ stage_order: 1 });
+
+            const totalStages = stages.length;
+            const completedStages = stages.filter(s => s.status === 'Completed').length;
+            const progress = totalStages > 0 ? Math.round((completedStages / totalStages) * 100) : 0;
+
+            // Find current stage (first one that is In Progress or Pending)
+            const currentStage = stages.find(s => s.status === 'In Progress') ||
+                stages.find(s => s.status === 'Pending') ||
+                (stages.length > 0 ? stages[stages.length - 1] : null);
+
+            return {
+                ...project.toObject(),
+                progress,
+                total_stages: totalStages,
+                completed_stages: completedStages,
+                current_stage_name: currentStage ? currentStage.stage_name : (project.status || 'Planning')
+            };
+        }));
+
+        res.json(projectsWithProgress);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
