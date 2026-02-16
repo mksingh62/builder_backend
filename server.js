@@ -1227,6 +1227,160 @@ app.delete('/api/documents/:id', authenticateToken, requireAdmin, async (req, re
     }
 });
 
+// ==================== WORKERS API ====================
+
+// Get all workers
+app.get('/api/workers', authenticateToken, async (req, res) => {
+    try {
+        const workers = await Worker.find().sort({ createdAt: -1 });
+        res.json(workers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get worker by ID
+app.get('/api/workers/:id', authenticateToken, async (req, res) => {
+    try {
+        const worker = await Worker.findById(req.params.id);
+        if (!worker) {
+            return res.status(404).json({ error: 'Worker not found' });
+        }
+        res.json(worker);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Create worker
+app.post('/api/workers', authenticateToken, async (req, res) => {
+    try {
+        const worker = new Worker(req.body);
+        await worker.save();
+        res.status(201).json(worker);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Update worker
+app.put('/api/workers/:id', authenticateToken, async (req, res) => {
+    try {
+        const worker = await Worker.findByIdAndUpdate(
+            req.params.id,
+            req.body,
+            { new: true, runValidators: true }
+        );
+        if (!worker) {
+            return res.status(404).json({ error: 'Worker not found' });
+        }
+        res.json(worker);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Delete worker
+app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const worker = await Worker.findByIdAndDelete(req.params.id);
+        if (!worker) {
+            return res.status(404).json({ error: 'Worker not found' });
+        }
+        res.json({ message: 'Worker deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ==================== MATERIALS API ====================
+
+// Get all materials
+app.get('/api/materials', authenticateToken, async (req, res) => {
+    try {
+        const materials = await Material.find()
+            .populate('category_id', 'name')
+            .sort({ createdAt: -1 });
+
+        // Transform to include category_name
+        const materialsWithCategory = materials.map(m => {
+            const obj = m.toObject();
+            if (obj.category_id) {
+                obj.category_name = obj.category_id.name;
+            }
+            return obj;
+        });
+
+        res.json(materialsWithCategory);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get material by ID
+app.get('/api/materials/:id', authenticateToken, async (req, res) => {
+    try {
+        const material = await Material.findById(req.params.id).populate('category_id', 'name');
+        if (!material) {
+            return res.status(404).json({ error: 'Material not found' });
+        }
+        res.json(material);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Create material
+app.post('/api/materials', authenticateToken, async (req, res) => {
+    try {
+        const material = new Material(req.body);
+        await material.save();
+        res.status(201).json(material);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Update material
+app.put('/api/materials/:id', authenticateToken, async (req, res) => {
+    try {
+        const material = await Material.findByIdAndUpdate(
+            req.params.id,
+            req.body,
+            { new: true, runValidators: true }
+        );
+        if (!material) {
+            return res.status(404).json({ error: 'Material not found' });
+        }
+        res.json(material);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Delete material
+app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const material = await Material.findByIdAndDelete(req.params.id);
+        if (!material) {
+            return res.status(404).json({ error: 'Material not found' });
+        }
+        res.json({ message: 'Material deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get all material categories
+app.get('/api/material-categories', authenticateToken, async (req, res) => {
+    try {
+        const categories = await MaterialCategory.find();
+        res.json(categories);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
