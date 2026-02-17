@@ -2,22 +2,32 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
-require('dotenv').config();
+const cron = require('node-cron');
+const fs = require('fs');
+
+const config = require('./config');
+const { authenticateToken, requireAdmin } = require('./middleware/auth');
+const errorHandler = require('./middleware/errorHandler');
+const { authLimiter } = require('./middleware/rateLimit');
+const { validatePhone, validatePassword } = require('./utils/validation');
+const logger = require('./utils/logger');
 
 const app = express();
-app.use(cors());
+// CORS - allow all origins for now (restrict in production)
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true
+}));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'house_construction_secret_key_2024';
-
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI || config.mongodbUri || '')
     .then(() => console.log('MongoDB Connected'))
     .catch(err => console.error('MongoDB Connection Error:', err));
 
@@ -32,6 +42,8 @@ const userSchema = new mongoose.Schema({
     profilePhoto: String,
     createdAt: { type: Date, default: Date.now }
 });
+userSchema.index({ phone: 1 });
+userSchema.index({ createdAt: -1 });
 const User = mongoose.model('User', userSchema);
 
 // Material Category Model
@@ -80,6 +92,10 @@ const projectSchema = new mongoose.Schema({
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
+projectSchema.index({ createdBy: 1 });
+projectSchema.index({ status: 1 });
+projectSchema.index({ createdAt: -1 });
+projectSchema.index({ customer_phone: 1 });
 const Project = mongoose.model('Project', projectSchema);
 
 // Project Material Model
@@ -90,6 +106,7 @@ const projectMaterialSchema = new mongoose.Schema({
     unit_price: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
+projectMaterialSchema.index({ project_id: 1 });
 const ProjectMaterial = mongoose.model('ProjectMaterial', projectMaterialSchema);
 
 // Project Worker Model
@@ -100,6 +117,7 @@ const projectWorkerSchema = new mongoose.Schema({
     daily_wage: { type: Number, default: 0 },
     total_wage: { type: Number, default: 0 }
 });
+projectWorkerSchema.index({ project_id: 1 });
 const ProjectWorker = mongoose.model('ProjectWorker', projectWorkerSchema);
 
 // Quotation Model
@@ -114,6 +132,8 @@ const quotationSchema = new mongoose.Schema({
     status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
     createdAt: { type: Date, default: Date.now }
 });
+quotationSchema.index({ project_id: 1 });
+quotationSchema.index({ createdAt: -1 });
 const Quotation = mongoose.model('Quotation', quotationSchema);
 
 // ========== NEW MODELS FOR ADVANCED FLOW ==========
@@ -138,6 +158,7 @@ const projectStageSchema = new mongoose.Schema({
     labor_cost: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
+projectStageSchema.index({ project_id: 1, stage_order: 1 });
 const ProjectStage = mongoose.model('ProjectStage', projectStageSchema);
 
 // Stage Materials
@@ -197,19 +218,37 @@ const paymentSchema = new mongoose.Schema({
     payment_mode: String,
     transaction_id: String
 });
+paymentSchema.index({ project_id: 1 });
+paymentSchema.index({ due_date: 1 });
 const Payment = mongoose.model('Payment', paymentSchema);
 
 // Document
 const documentSchema = new mongoose.Schema({
     project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    document_type: { type: String, enum: ['Site Photo', 'Bill', 'Invoice', 'Material Proof', 'Contract', 'Other'] },
+    document_type: { type: String, enum: ['Site Photo', 'Bill', 'Invoice', 'Material Proof', 'Contract', 'Other'], default: 'Other' },
     file_name: String,
     file_url: String,
+    file_size: Number,
     description: String,
     uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
+documentSchema.index({ project_id: 1, createdAt: -1 });
 const Document = mongoose.model('Document', documentSchema);
+
+// Notification Model
+const notificationSchema = new mongoose.Schema({
+    user_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    type: { type: String, enum: ['payment_reminder', 'stage_complete', 'project_update', 'payment_received', 'material_low', 'general'], required: true },
+    title: { type: String, required: true },
+    message: { type: String, required: true },
+    related_id: mongoose.Schema.Types.ObjectId,
+    related_type: { type: String, enum: ['project', 'payment', 'material', 'worker', null] },
+    read: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+});
+notificationSchema.index({ user_id: 1, read: 1, createdAt: -1 });
+const Notification = mongoose.model('Notification', notificationSchema);
 
 // Quotation Version
 const quotationVersionSchema = new mongoose.Schema({
@@ -249,10 +288,44 @@ const quotationWorkerSchema = new mongoose.Schema({
 const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
 
 // ==================== MULTER CONFIGURATION ====================
-const storage = multer.memoryStorage(); // Switch to memory storage for Vercel compatibility
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads', 'documents');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
+// Disk storage for documents (better for larger files)
+const documentStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+// Memory storage for profile photos (smaller files)
+const profileStorage = multer.memoryStorage();
+
+// Document upload (multipart)
+const documentUpload = multer({
+    storage: documentStorage,
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = /jpeg|jpg|png|pdf|doc|docx|xls|xlsx/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        if (extname && mimetype) {
+            return cb(null, true);
+        }
+        cb(new Error('Invalid file type. Only images, PDFs, and Office documents allowed.'));
+    }
+});
+
+// Profile photo upload (memory)
 const upload = multer({
-    storage: storage,
+    storage: profileStorage,
     limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
     fileFilter: (req, file, cb) => {
         const filetypes = /jpeg|jpg|png|webp/;
@@ -266,128 +339,93 @@ const upload = multer({
     }
 });
 
-// ==================== MIDDLEWARE ====================
-
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-        return res.status(401).json({ error: 'Access token required' });
-    }
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ error: 'Invalid or expired token' });
-        }
-        req.user = user;
-        next();
-    });
-};
-
-const requireAdmin = (req, res, next) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
-    }
-    next();
-};
-
 // ==================== AUTH ROUTES ====================
 
 // Login
-app.post('/api/auth/login', async (req, res) => {
-    const { phone, password } = req.body;
-    console.log('Login attempt for:', phone);
-
+app.post('/api/auth/login', authLimiter, async (req, res, next) => {
     try {
+        const { phone, password } = req.body;
+        if (!phone || !password) {
+            return res.status(400).json({ success: false, message: 'Phone and password required' });
+        }
+        if (!validatePhone(phone)) {
+            return res.status(400).json({ success: false, message: 'Invalid phone number format' });
+        }
         const user = await User.findOne({ phone });
         if (!user) {
-            console.log('Login failed: User not found -', phone);
             return res.status(401).json({ success: false, message: 'User not found' });
         }
-
-        if (user.password !== password) {
-            console.log('Login failed: Invalid password for -', phone);
+        const valid = await bcrypt.compare(password, user.password);
+        if (!valid) {
             return res.status(401).json({ success: false, message: 'Invalid password' });
         }
-
         const token = jwt.sign(
             { id: user._id, phone: user.phone, role: user.role },
-            JWT_SECRET,
-            { expiresIn: '24h' }
+            config.jwtSecret,
+            { expiresIn: config.jwtExpiresIn }
         );
-
-        console.log('Login successful for:', phone, 'Role:', user.role);
-
         res.json({
             success: true,
             token,
-            user: {
-                id: user._id,
-                name: user.name,
-                phone: user.phone,
-                role: user.role
-                // profilePhoto removed to keep login payload small
-            }
+            user: { id: user._id, name: user.name, phone: user.phone, role: user.role }
         });
     } catch (err) {
-        console.error('Login Error:', err);
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Register
-app.post('/api/auth/register', async (req, res) => {
-    const { name, phone, password, role } = req.body;
+app.post('/api/auth/register', authLimiter, async (req, res, next) => {
     try {
-        const newUser = new User({ name, phone, password, role: role || 'customer' });
+        const { name, phone, password, role } = req.body;
+        if (!name || !phone || !password) {
+            return res.status(400).json({ success: false, message: 'Name, phone and password required' });
+        }
+        if (!validatePhone(phone)) {
+            return res.status(400).json({ success: false, message: 'Invalid phone number format' });
+        }
+        if (!validatePassword(password)) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+        }
+        const hashed = await bcrypt.hash(password, 10);
+        const newUser = new User({ name, phone, password: hashed, role: role || 'customer' });
         await newUser.save();
-        res.json({ success: true, id: newUser._id, message: 'User registered successfully' });
+        res.status(201).json({ success: true, id: newUser._id, message: 'User registered successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get current user profile
-app.get('/api/auth/profile', authenticateToken, async (req, res) => {
+app.get('/api/auth/profile', authenticateToken, async (req, res, next) => {
     try {
         const user = await User.findById(req.user.id).select('-password');
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         res.json(user);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { next(err); }
 });
 
 // Update user profile
-app.put('/api/auth/profile', authenticateToken, async (req, res) => {
-    const { name, phone } = req.body;
+app.put('/api/auth/profile', authenticateToken, async (req, res, next) => {
     try {
-        const user = await User.findByIdAndUpdate(
-            req.user.id,
-            { name, phone },
-            { new: true }
-        ).select('-password');
+        const { name, phone } = req.body;
+        const user = await User.findByIdAndUpdate(req.user.id, { name, phone }, { new: true }).select('-password');
         res.json({ success: true, user });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { next(err); }
 });
 
 // Update profile photo
-app.put('/api/auth/profile/photo', authenticateToken, (req, res) => {
+app.put('/api/auth/profile/photo', authenticateToken, (req, res, next) => {
     upload.single('photo')(req, res, async (err) => {
         if (err instanceof multer.MulterError) {
-            return res.status(400).json({ error: `Multer error: ${err.message}` });
+            return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
         } else if (err) {
-            return res.status(500).json({ error: `Upload error: ${err.message}` });
+            return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
         }
 
         try {
             if (!req.file) {
-                return res.status(400).json({ error: 'Please upload an image' });
+                return res.status(400).json({ success: false, message: 'Please upload an image' });
             }
 
             // Convert buffer to Base64 data URL
@@ -401,27 +439,31 @@ app.put('/api/auth/profile/photo', authenticateToken, (req, res) => {
 
             res.json({ success: true, profilePhoto: base64Image, user });
         } catch (err) {
-            res.status(500).json({ error: err.message });
+            next(err);
         }
     });
 });
 
 // Change password
-app.put('/api/auth/change-password', authenticateToken, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
+app.put('/api/auth/change-password', authenticateToken, async (req, res, next) => {
     try {
+        const { currentPassword, newPassword } = req.body;
         const user = await User.findById(req.user.id);
         if (!user) {
-            return res.status(404).json({ error: 'User not found' });
+            return res.status(404).json({ success: false, message: 'User not found' });
         }
-        if (user.password !== currentPassword) {
-            return res.status(400).json({ error: 'Current password is incorrect' });
+        const valid = await bcrypt.compare(currentPassword, user.password);
+        if (!valid) {
+            return res.status(400).json({ success: false, message: 'Current password is incorrect' });
         }
-        user.password = newPassword;
+        if (String(newPassword).length < 6) {
+            return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+        }
+        user.password = await bcrypt.hash(newPassword, 10);
         await user.save();
         res.json({ success: true, message: 'Password changed successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
@@ -435,7 +477,7 @@ const appSettingsSchema = new mongoose.Schema({
 const AppSetting = mongoose.model('AppSetting', appSettingsSchema);
 
 // Get app settings
-app.get('/api/settings', authenticateToken, async (req, res) => {
+app.get('/api/settings', authenticateToken, async (req, res, next) => {
     try {
         const settings = await AppSetting.find();
         const settingsMap = {};
@@ -444,14 +486,14 @@ app.get('/api/settings', authenticateToken, async (req, res) => {
         });
         res.json(settingsMap);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Update app setting (Admin only)
-app.put('/api/settings/:key', authenticateToken, requireAdmin, async (req, res) => {
-    const { value } = req.body;
+app.put('/api/settings/:key', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
+        const { value } = req.body;
         let setting = await AppSetting.findOne({ key: req.params.key });
         if (setting) {
             setting.value = value;
@@ -462,87 +504,34 @@ app.put('/api/settings/:key', authenticateToken, requireAdmin, async (req, res) 
         }
         res.json({ success: true, setting });
     } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// ==================== MATERIAL ROUTES ====================
-
-app.get('/api/materials', authenticateToken, async (req, res) => {
-    try {
-        const materials = await Material.find().populate('category_id', 'name');
-        res.json(materials);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/materials', authenticateToken, requireAdmin, async (req, res) => {
-    const { name, category_id, price_per_unit, unit } = req.body;
-    try {
-        const newMaterial = new Material({ name, category_id, price_per_unit, unit });
-        await newMaterial.save();
-        res.json(newMaterial);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/material-categories', authenticateToken, async (req, res) => {
-    try {
-        const categories = await MaterialCategory.find();
-        res.json(categories);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, res) => {
-    try {
-        await Material.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Material deleted' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// ==================== WORKER ROUTES ====================
-
-app.get('/api/workers', authenticateToken, async (req, res) => {
-    try {
-        const workers = await Worker.find();
-        res.json(workers);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/workers', authenticateToken, requireAdmin, async (req, res) => {
-    const { name, role, daily_wage, phone } = req.body;
-    try {
-        const newWorker = new Worker({ name, role, daily_wage, phone });
-        await newWorker.save();
-        res.json(newWorker);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res) => {
-    try {
-        await Worker.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Worker deleted' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== PROJECT ROUTES ====================
 
-app.get('/api/projects', authenticateToken, async (req, res) => {
+app.get('/api/projects', authenticateToken, async (req, res, next) => {
     try {
-        const query = req.user.role === 'customer' ? { customer_phone: req.user.phone } : {};
-        const projects = await Project.find(query).sort({ createdAt: -1 });
+        const page = parseInt(req.query.page || '1', 10);
+        const limit = parseInt(req.query.limit || '50', 10);
+        const skip = (page - 1) * limit;
+        const statusFilter = req.query.status;
+        const sortBy = req.query.sort || '-createdAt';
+
+        let query = req.user.role === 'customer' ? { customer_phone: req.user.phone } : {};
+        if (statusFilter && statusFilter !== 'All') {
+            query.status = statusFilter;
+        }
+
+        const total = await Project.countDocuments(query);
+        let sortQuery = {};
+        if (sortBy.startsWith('-')) {
+            sortQuery[sortBy.substring(1)] = -1;
+        } else {
+            sortQuery[sortBy] = 1;
+        }
+
+        const projects = await Project.find(query).sort(sortQuery).skip(skip).limit(limit);
 
         // Add stage progress to each project
         const projectsWithProgress = await Promise.all(projects.map(async (project) => {
@@ -566,70 +555,111 @@ app.get('/api/projects', authenticateToken, async (req, res) => {
             };
         }));
 
-        res.json(projectsWithProgress);
+        res.json({
+            success: true,
+            data: projectsWithProgress,
+            pagination: {
+                page,
+                limit,
+                total,
+                pages: Math.ceil(total / limit)
+            }
+        });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.get('/api/projects/:id', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id', authenticateToken, async (req, res, next) => {
     try {
         const project = await Project.findById(req.params.id);
         if (!project) {
-            return res.status(404).json({ error: 'Project not found' });
+            return res.status(404).json({ success: false, message: 'Project not found' });
         }
-        res.json(project);
+        // Normalize _id to id
+        const projectObj = project.toObject();
+        projectObj.id = projectObj._id.toString();
+        delete projectObj._id;
+        res.json({ success: true, data: projectObj });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/projects', authenticateToken, async (req, res) => {
-    const { project_name, customer_name, site_address, area_sqft, status } = req.body;
+app.post('/api/projects', authenticateToken, async (req, res, next) => {
     try {
+        const { project_name, customer_name, site_address, area_sqft, status, customer_phone } = req.body;
+        if (!project_name) {
+            return res.status(400).json({ success: false, message: 'Project name is required' });
+        }
+        
+        // Auto-set customer_phone if user is customer
+        const finalCustomerPhone = customer_phone || (req.user.role === 'customer' ? req.user.phone : null);
+        
         const newProject = new Project({
             project_name,
             customer_name,
+            customer_phone: finalCustomerPhone,
             site_address,
             area_sqft,
             status: status || 'Planning',
             createdBy: req.user.id
         });
         await newProject.save();
-        res.json(newProject);
+        
+        // Create default stages from StageMaster if project is created
+        const defaultStages = await StageMaster.find().sort({ order: 1 });
+        if (defaultStages.length > 0) {
+            for (const stage of defaultStages) {
+                await ProjectStage.create({
+                    project_id: newProject._id,
+                    stage_name: stage.name,
+                    stage_order: stage.order,
+                    status: 'Pending'
+                });
+            }
+        }
+        
+        const projectObj = newProject.toObject();
+        projectObj.id = projectObj._id.toString();
+        delete projectObj._id;
+        res.status(201).json({ success: true, data: projectObj });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.put('/api/projects/:id', authenticateToken, async (req, res) => {
+app.put('/api/projects/:id', authenticateToken, async (req, res, next) => {
     try {
         const project = await Project.findByIdAndUpdate(req.params.id, req.body, { new: true });
         if (!project) {
-            return res.status(404).json({ error: 'Project not found' });
+            return res.status(404).json({ success: false, message: 'Project not found' });
         }
         res.json(project);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get project materials
-app.get('/api/projects/:id/materials', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/materials', authenticateToken, async (req, res, next) => {
     try {
         const materials = await ProjectMaterial.find({ project_id: req.params.id }).populate('material_id', 'name unit price_per_unit');
         res.json(materials);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Add material to project
-app.post('/api/projects/:id/materials', authenticateToken, async (req, res) => {
-    const { material_id, quantity, unit_price } = req.body;
-    const project_id = req.params.id;
-    const total_cost = quantity * unit_price;
+app.post('/api/projects/:id/materials', authenticateToken, async (req, res, next) => {
     try {
+        const { material_id, quantity, unit_price } = req.body;
+        if (!material_id || !quantity || !unit_price) {
+            return res.status(400).json({ success: false, message: 'Material ID, quantity and unit price are required' });
+        }
+        const project_id = req.params.id;
+        const total_cost = quantity * unit_price;
         const newProjectMaterial = new ProjectMaterial({
             project_id,
             material_id,
@@ -638,28 +668,31 @@ app.post('/api/projects/:id/materials', authenticateToken, async (req, res) => {
             total_cost
         });
         await newProjectMaterial.save();
-        res.json(newProjectMaterial);
+        res.status(201).json(newProjectMaterial);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get project workers
-app.get('/api/projects/:id/workers', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/workers', authenticateToken, async (req, res, next) => {
     try {
         const workers = await ProjectWorker.find({ project_id: req.params.id }).populate('worker_id', 'name role daily_wage');
         res.json(workers);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Add worker to project
-app.post('/api/projects/:id/workers', authenticateToken, async (req, res) => {
-    const { worker_id, days, daily_wage } = req.body;
-    const project_id = req.params.id;
-    const total_wage = days * daily_wage;
+app.post('/api/projects/:id/workers', authenticateToken, async (req, res, next) => {
     try {
+        const { worker_id, days, daily_wage } = req.body;
+        if (!worker_id || !days || !daily_wage) {
+            return res.status(400).json({ success: false, message: 'Worker ID, days and daily wage are required' });
+        }
+        const project_id = req.params.id;
+        const total_wage = days * daily_wage;
         const newProjectWorker = new ProjectWorker({
             project_id,
             worker_id,
@@ -668,14 +701,14 @@ app.post('/api/projects/:id/workers', authenticateToken, async (req, res) => {
             total_wage
         });
         await newProjectWorker.save();
-        res.json(newProjectWorker);
+        res.status(201).json(newProjectWorker);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get project costing
-app.get('/api/projects/:id/costing', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/costing', authenticateToken, async (req, res, next) => {
     try {
         const materials = await ProjectMaterial.find({ project_id: req.params.id }).populate('material_id', 'name unit price_per_unit');
         const workers = await ProjectWorker.find({ project_id: req.params.id }).populate('worker_id', 'name role daily_wage');
@@ -701,26 +734,26 @@ app.get('/api/projects/:id/costing', authenticateToken, async (req, res) => {
             total_cost
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== QUOTATION ROUTES ====================
 
-app.get('/api/quotations', authenticateToken, async (req, res) => {
+app.get('/api/quotations', authenticateToken, async (req, res, next) => {
     try {
         const quotations = await Quotation.find().populate('project_id', 'project_name customer_name').sort({ createdAt: -1 });
         res.json(quotations);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.get('/api/quotations/:id', async (req, res) => {
+app.get('/api/quotations/:id', authenticateToken, async (req, res, next) => {
     try {
         const quotation = await Quotation.findById(req.params.id).populate('project_id', 'project_name customer_name area_sqft');
         if (!quotation) {
-            return res.status(404).json({ error: 'Quotation not found' });
+            return res.status(404).json({ success: false, message: 'Quotation not found' });
         }
 
         const materials = await QuotationMaterial.find({ quotation_id: req.params.id }).populate('material_id', 'name unit');
@@ -732,14 +765,21 @@ app.get('/api/quotations/:id', async (req, res) => {
             workers
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
-    const { project_id } = req.body;
-
+app.post('/api/quotation/generate', authenticateToken, async (req, res, next) => {
     try {
+        const { project_id } = req.body;
+        if (!project_id) {
+            return res.status(400).json({ success: false, message: 'Project ID is required' });
+        }
+
+        // Get GST rate from AppSetting (default 18%)
+        const gstSetting = await AppSetting.findOne({ key: 'gst_rate' });
+        const gstRate = gstSetting ? (gstSetting.value / 100) : 0.18;
+
         const materials = await ProjectMaterial.find({ project_id }).populate('material_id', 'name unit price_per_unit');
         const workers = await ProjectWorker.find({ project_id }).populate('worker_id', 'name role daily_wage');
 
@@ -755,7 +795,7 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
         });
 
         const total_cost = material_cost + labor_cost;
-        const gst_amount = total_cost * 0.18;
+        const gst_amount = total_cost * gstRate;
         const grand_total = total_cost + gst_amount;
 
         const quotation_number = 'QTN-' + Date.now().toString().slice(-8);
@@ -806,59 +846,59 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res) => {
             message: 'Quotation generated successfully'
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete project
-app.delete('/api/projects/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/projects/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         await Project.findByIdAndDelete(req.params.id);
         // Also delete related project materials and workers
         await ProjectMaterial.deleteMany({ project_id: req.params.id });
         await ProjectWorker.deleteMany({ project_id: req.params.id });
-        res.json({ message: 'Project deleted' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete project material
-app.delete('/api/projects/:projectId/materials/:materialId', authenticateToken, async (req, res) => {
+app.delete('/api/projects/:projectId/materials/:materialId', authenticateToken, async (req, res, next) => {
     try {
         await ProjectMaterial.findByIdAndDelete(req.params.materialId);
-        res.json({ message: 'Project material deleted' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete project worker
-app.delete('/api/projects/:projectId/workers/:workerId', authenticateToken, async (req, res) => {
+app.delete('/api/projects/:projectId/workers/:workerId', authenticateToken, async (req, res, next) => {
     try {
         await ProjectWorker.findByIdAndDelete(req.params.workerId);
-        res.json({ message: 'Project worker deleted' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete quotation
-app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         await Quotation.findByIdAndDelete(req.params.id);
         // Also delete related quotation materials and workers
         await QuotationMaterial.deleteMany({ quotation_id: req.params.id });
         await QuotationWorker.deleteMany({ quotation_id: req.params.id });
-        res.json({ message: 'Quotation deleted' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== SEED DATA ROUTE (for initial setup) ====================
 
-app.post('/api/seed', async (req, res) => {
+app.post('/api/seed', async (req, res, next) => {
     try {
         // Clear existing data first
         await User.deleteMany({});
@@ -879,11 +919,12 @@ app.post('/api/seed', async (req, res) => {
         await QuotationVersion.deleteMany({});
         await AppSetting.deleteMany({});
 
-        // Create Users
-        const admin = await User.create({ name: 'Admin', phone: '1234567890', password: 'admin123', role: 'admin' });
-        const staff = await User.create({ name: 'Rahul Sharma', phone: '9876543210', password: 'staff123', role: 'staff' });
-        const customer = await User.create({ name: 'Amit Patel', phone: '9988776655', password: 'user123', role: 'customer' });
-        const customer2 = await User.create({ name: 'Suresh Kumar', phone: '9977665544', password: 'user123', role: 'customer' });
+        // Create Users (passwords hashed with bcrypt)
+        const hash = (p) => bcrypt.hashSync(p, 10);
+        const admin = await User.create({ name: 'Admin', phone: '1234567890', password: hash('admin123'), role: 'admin' });
+        const staff = await User.create({ name: 'Rahul Sharma', phone: '9876543210', password: hash('staff123'), role: 'staff' });
+        const customer = await User.create({ name: 'Amit Patel', phone: '9988776655', password: hash('user123'), role: 'customer' });
+        await User.create({ name: 'Suresh Kumar', phone: '9977665544', password: hash('user123'), role: 'customer' });
 
         // Create Material Categories
         const categories = await MaterialCategory.create([
@@ -1026,62 +1067,62 @@ app.post('/api/seed', async (req, res) => {
             stats: { materials: materials.length, workers: workers.length, stages: stages.length, projects: 2, payments: 3 }
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== NEW ADVANCED FEATURES ROUTES ====================
 
 // Stage Master Routes
-app.get('/api/stages', authenticateToken, async (req, res) => {
+app.get('/api/stages', authenticateToken, async (req, res, next) => {
     try {
         const stages = await StageMaster.find().sort({ order: 1 });
         res.json(stages);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/stages', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/stages', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         const stage = new StageMaster(req.body);
         await stage.save();
         res.status(201).json(stage);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.put('/api/stages/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/stages/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         const stage = await StageMaster.findByIdAndUpdate(req.params.id, req.body, { new: true });
         res.json(stage);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.delete('/api/stages/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/stages/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         await StageMaster.findByIdAndDelete(req.params.id);
         res.json({ message: 'Stage deleted successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Project Stage Routes
-app.get('/api/projects/:id/stages', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/stages', authenticateToken, async (req, res, next) => {
     try {
         const projectStages = await ProjectStage.find({ project_id: req.params.id })
             .sort({ stage_order: 1 });
         res.json(projectStages);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/projects/:id/stages', authenticateToken, async (req, res) => {
+app.post('/api/projects/:id/stages', authenticateToken, async (req, res, next) => {
     try {
         const projectStage = new ProjectStage({
             project_id: req.params.id,
@@ -1090,11 +1131,11 @@ app.post('/api/projects/:id/stages', authenticateToken, async (req, res) => {
         await projectStage.save();
         res.status(201).json(projectStage);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (req, res) => {
+app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (req, res, next) => {
     try {
         const projectStage = await ProjectStage.findByIdAndUpdate(
             req.params.stageId,
@@ -1103,30 +1144,37 @@ app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (re
         );
         res.json(projectStage);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Daily Entry Routes
-app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
         const dailyEntries = await DailyEntry.find({ project_id: req.params.id })
             .populate('workers_present', 'name role')
             .sort({ date: -1 });
         res.json(dailyEntries);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res) => {
+app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
+        const { workers_present, materials_used, extra_expenses, expense_description, notes, date } = req.body;
+        
         const dailyEntry = new DailyEntry({
             project_id: req.params.id,
-            ...req.body
+            date: date ? new Date(date) : new Date(),
+            workers_present: workers_present || [],
+            materials_used: materials_used || [],
+            extra_expenses: extra_expenses || 0,
+            expense_description,
+            notes
         });
 
-        // Calculate total daily cost
+        // Calculate total daily cost: materials + extra expenses + worker wages
         let totalCost = dailyEntry.extra_expenses || 0;
 
         // Add material costs
@@ -1134,36 +1182,44 @@ app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res) 
             totalCost += material.cost || 0;
         }
 
+        // Add worker wages (daily_wage × number of workers present)
+        if (dailyEntry.workers_present && dailyEntry.workers_present.length > 0) {
+            const workers = await Worker.find({ _id: { $in: dailyEntry.workers_present } });
+            for (const worker of workers) {
+                totalCost += worker.daily_wage || 0;
+            }
+        }
+
         dailyEntry.total_daily_cost = totalCost;
         await dailyEntry.save();
 
         res.status(201).json(dailyEntry);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.delete('/api/daily-entries/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/daily-entries/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         await DailyEntry.findByIdAndDelete(req.params.id);
         res.json({ message: 'Daily entry deleted successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Payment Routes
-app.get('/api/projects/:id/payments', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/payments', authenticateToken, async (req, res, next) => {
     try {
         const payments = await Payment.find({ project_id: req.params.id })
             .sort({ due_date: 1 });
         res.json(payments);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/projects/:id/payments', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/projects/:id/payments', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         const payment = new Payment({
             project_id: req.params.id,
@@ -1172,40 +1228,87 @@ app.post('/api/projects/:id/payments', authenticateToken, requireAdmin, async (r
         await payment.save();
         res.status(201).json(payment);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.put('/api/payments/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/payments/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
-        const payment = await Payment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const { paid_amount, payment_date, payment_mode, transaction_id, status } = req.body;
+        const payment = await Payment.findById(req.params.id);
+        if (!payment) {
+            return res.status(404).json({ success: false, message: 'Payment not found' });
+        }
+
+        // Update payment
+        if (paid_amount != null) payment.paid_amount = paid_amount;
+        if (payment_date) payment.payment_date = new Date(payment_date);
+        if (payment_mode) payment.payment_mode = payment_mode;
+        if (transaction_id) payment.transaction_id = transaction_id;
+        if (status) payment.status = status;
+
+        // Auto-update status based on paid_amount
+        if (paid_amount != null) {
+            if (paid_amount >= payment.amount) {
+                payment.status = 'Paid';
+            } else if (paid_amount > 0) {
+                payment.status = 'Partial';
+            } else {
+                payment.status = 'Pending';
+            }
+        }
+
+        await payment.save();
+
+        // Update project paid_amount
+        const project = await Project.findById(payment.project_id);
+        if (project) {
+            const payments = await Payment.find({ project_id: payment.project_id });
+            const totalPaid = payments.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+            project.paid_amount = totalPaid;
+            await project.save();
+        }
+
         res.json(payment);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.delete('/api/payments/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/payments/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
-        await Payment.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Payment deleted successfully' });
+        const payment = await Payment.findByIdAndDelete(req.params.id);
+        if (!payment) {
+            return res.status(404).json({ success: false, message: 'Payment not found' });
+        }
+        
+        // Recalculate project paid_amount after deletion
+        const project = await Project.findById(payment.project_id);
+        if (project) {
+            const payments = await Payment.find({ project_id: payment.project_id });
+            const totalPaid = payments.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+            project.paid_amount = totalPaid;
+            await project.save();
+        }
+        
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Document Routes
-app.get('/api/projects/:id/documents', authenticateToken, async (req, res) => {
+app.get('/api/projects/:id/documents', authenticateToken, async (req, res, next) => {
     try {
         const documents = await Document.find({ project_id: req.params.id })
             .sort({ createdAt: -1 });
         res.json(documents);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.post('/api/projects/:id/documents', authenticateToken, async (req, res) => {
+app.post('/api/projects/:id/documents', authenticateToken, async (req, res, next) => {
     try {
         const document = new Document({
             project_id: req.params.id,
@@ -1214,57 +1317,101 @@ app.post('/api/projects/:id/documents', authenticateToken, async (req, res) => {
         await document.save();
         res.status(201).json(document);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-app.delete('/api/documents/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/documents/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
-        await Document.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Document deleted successfully' });
+        const doc = await Document.findByIdAndDelete(req.params.id);
+        if (!doc) {
+            return res.status(404).json({ success: false, message: 'Document not found' });
+        }
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== WORKERS API ====================
 
-// Get all workers
-app.get('/api/workers', authenticateToken, async (req, res) => {
+// Get all workers (with pagination support)
+app.get('/api/workers', authenticateToken, async (req, res, next) => {
     try {
-        const workers = await Worker.find().sort({ createdAt: -1 });
-        res.json(workers);
+        const page = parseInt(req.query.page || '1', 10);
+        const limit = parseInt(req.query.limit || '50', 10);
+        const skip = (page - 1) * limit;
+        const sortBy = req.query.sort || '-createdAt';
+
+        let sortQuery = {};
+        if (sortBy.startsWith('-')) {
+            sortQuery[sortBy.substring(1)] = -1;
+        } else {
+            sortQuery[sortBy] = 1;
+        }
+
+        const total = await Worker.countDocuments();
+        const workers = await Worker.find().sort(sortQuery).skip(skip).limit(limit);
+
+        // Return paginated response if page/limit specified, else direct array for backward compatibility
+        if (req.query.page || req.query.limit) {
+            res.json({
+                success: true,
+                data: workers,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    pages: Math.ceil(total / limit)
+                }
+            });
+        } else {
+            res.json(workers);
+        }
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get worker by ID
-app.get('/api/workers/:id', authenticateToken, async (req, res) => {
+app.get('/api/workers/:id', authenticateToken, async (req, res, next) => {
     try {
         const worker = await Worker.findById(req.params.id);
         if (!worker) {
-            return res.status(404).json({ error: 'Worker not found' });
+            return res.status(404).json({ success: false, message: 'Worker not found' });
         }
-        res.json(worker);
+        const workerObj = worker.toObject();
+        workerObj.id = workerObj._id.toString();
+        delete workerObj._id;
+        res.json({ success: true, data: workerObj });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Create worker
-app.post('/api/workers', authenticateToken, async (req, res) => {
+app.post('/api/workers', authenticateToken, async (req, res, next) => {
     try {
-        const worker = new Worker(req.body);
+        const { name, role, daily_wage, phone_number, location } = req.body;
+        if (!name || daily_wage == null) {
+            return res.status(400).json({ success: false, message: 'Name and daily wage are required' });
+        }
+        if (daily_wage < 0) {
+            return res.status(400).json({ success: false, message: 'Daily wage must be positive' });
+        }
+        const worker = new Worker({ name, role: role || 'Worker', daily_wage, phone_number, location });
         await worker.save();
-        res.status(201).json(worker);
+        const workerObj = worker.toObject();
+        workerObj.id = workerObj._id.toString();
+        delete workerObj._id;
+        res.status(201).json({ success: true, data: workerObj });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Update worker
-app.put('/api/workers/:id', authenticateToken, async (req, res) => {
+app.put('/api/workers/:id', authenticateToken, async (req, res, next) => {
     try {
         const worker = await Worker.findByIdAndUpdate(
             req.params.id,
@@ -1276,31 +1423,52 @@ app.put('/api/workers/:id', authenticateToken, async (req, res) => {
         }
         res.json(worker);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete worker
-app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         const worker = await Worker.findByIdAndDelete(req.params.id);
         if (!worker) {
-            return res.status(404).json({ error: 'Worker not found' });
+            return res.status(404).json({ success: false, message: 'Worker not found' });
         }
-        res.json({ message: 'Worker deleted successfully' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // ==================== MATERIALS API ====================
 
-// Get all materials
-app.get('/api/materials', authenticateToken, async (req, res) => {
+// Get all materials (with pagination support)
+app.get('/api/materials', authenticateToken, async (req, res, next) => {
     try {
-        const materials = await Material.find()
+        const page = parseInt(req.query.page || '1', 10);
+        const limit = parseInt(req.query.limit || '50', 10);
+        const skip = (page - 1) * limit;
+        const sortBy = req.query.sort || '-createdAt';
+        const categoryFilter = req.query.category_id;
+
+        let query = {};
+        if (categoryFilter) {
+            query.category_id = categoryFilter;
+        }
+
+        let sortQuery = {};
+        if (sortBy.startsWith('-')) {
+            sortQuery[sortBy.substring(1)] = -1;
+        } else {
+            sortQuery[sortBy] = 1;
+        }
+
+        const total = await Material.countDocuments(query);
+        const materials = await Material.find(query)
             .populate('category_id', 'name')
-            .sort({ createdAt: -1 });
+            .sort(sortQuery)
+            .skip(skip)
+            .limit(limit);
 
         // Transform to include category_name
         const materialsWithCategory = materials.map(m => {
@@ -1311,38 +1479,65 @@ app.get('/api/materials', authenticateToken, async (req, res) => {
             return obj;
         });
 
-        res.json(materialsWithCategory);
+        // Return paginated response if page/limit specified, else direct array for backward compatibility
+        if (req.query.page || req.query.limit) {
+            res.json({
+                success: true,
+                data: materialsWithCategory,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    pages: Math.ceil(total / limit)
+                }
+            });
+        } else {
+            res.json(materialsWithCategory);
+        }
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get material by ID
-app.get('/api/materials/:id', authenticateToken, async (req, res) => {
+app.get('/api/materials/:id', authenticateToken, async (req, res, next) => {
     try {
         const material = await Material.findById(req.params.id).populate('category_id', 'name');
         if (!material) {
-            return res.status(404).json({ error: 'Material not found' });
+            return res.status(404).json({ success: false, message: 'Material not found' });
         }
-        res.json(material);
+        const materialObj = material.toObject();
+        materialObj.id = materialObj._id.toString();
+        delete materialObj._id;
+        if (materialObj.category_id) {
+            materialObj.category_name = materialObj.category_id.name;
+        }
+        res.json({ success: true, data: materialObj });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Create material
-app.post('/api/materials', authenticateToken, async (req, res) => {
+app.post('/api/materials', authenticateToken, async (req, res, next) => {
     try {
-        const material = new Material(req.body);
+        const { name, category_id, price_per_unit, unit } = req.body;
+        if (!name || !price_per_unit) {
+            return res.status(400).json({ success: false, message: 'Name and price per unit are required' });
+        }
+        if (price_per_unit < 0) {
+            return res.status(400).json({ success: false, message: 'Price must be positive' });
+        }
+        const material = new Material({ name, category_id, price_per_unit, unit: unit || 'unit' });
         await material.save();
         res.status(201).json(material);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Update material
-app.put('/api/materials/:id', authenticateToken, async (req, res) => {
+app.put('/api/materials/:id', authenticateToken, async (req, res, next) => {
     try {
         const material = await Material.findByIdAndUpdate(
             req.params.id,
@@ -1354,35 +1549,412 @@ app.put('/api/materials/:id', authenticateToken, async (req, res) => {
         }
         res.json(material);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Delete material
-app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
         const material = await Material.findByIdAndDelete(req.params.id);
         if (!material) {
-            return res.status(404).json({ error: 'Material not found' });
+            return res.status(404).json({ success: false, message: 'Material not found' });
         }
-        res.json({ message: 'Material deleted successfully' });
+        res.status(204).send();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
 // Get all material categories
-app.get('/api/material-categories', authenticateToken, async (req, res) => {
+app.get('/api/material-categories', authenticateToken, async (req, res, next) => {
     try {
         const categories = await MaterialCategory.find();
         res.json(categories);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 });
 
-// ==================== START SERVER ====================
+// Health check
+app.get('/api/health', async (req, res) => {
+    try {
+        // Check MongoDB connection
+        const dbState = mongoose.connection.readyState;
+        const isConnected = dbState === 1; // 1 = connected
+        
+        if (isConnected) {
+            res.status(200).json({
+                success: true,
+                status: 'ok',
+                database: 'connected',
+                timestamp: new Date().toISOString()
+            });
+        } else {
+            res.status(503).json({
+                success: false,
+                status: 'unhealthy',
+                database: 'disconnected',
+                timestamp: new Date().toISOString()
+            });
+        }
+    } catch (err) {
+        res.status(503).json({
+            success: false,
+            status: 'error',
+            message: err.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+// ==================== ANALYTICS ENDPOINTS ====================
+
+// Get analytics overview
+app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => {
+    try {
+        const projects = await Project.find();
+        const materials = await Material.find();
+        const workers = await Worker.find();
+        const payments = await Payment.find({ status: 'Paid' });
+        
+        // Calculate financial stats
+        const totalRevenue = projects.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+        const totalCost = projects.reduce((sum, p) => sum + (p.total_cost || 0), 0);
+        const profit = totalRevenue - totalCost;
+        const profitMargin = totalCost > 0 ? ((profit / totalCost) * 100).toFixed(2) : 0;
+        
+        // Monthly revenue (last 6 months)
+        const monthlyRevenue = [];
+        const now = new Date();
+        for (let i = 5; i >= 0; i--) {
+            const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
+            const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59);
+            
+            const monthPayments = await Payment.find({
+                payment_date: { $gte: monthStart, $lte: monthEnd },
+                status: 'Paid'
+            });
+            const revenue = monthPayments.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+            monthlyRevenue.push({
+                month: date.toLocaleString('default', { month: 'short', year: 'numeric' }),
+                revenue: Math.round(revenue),
+                monthIndex: date.getMonth()
+            });
+        }
+        
+        // Project status distribution
+        const statusCount = {
+            'Planning': projects.filter(p => p.status === 'Planning').length,
+            'In Progress': projects.filter(p => p.status === 'In Progress').length,
+            'Completed': projects.filter(p => p.status === 'Completed').length,
+            'Pending': projects.filter(p => p.status === 'Pending').length,
+        };
+        
+        // Outstanding payments
+        const outstandingPayments = await Payment.find({ status: { $in: ['Pending', 'Partial'] } });
+        const totalOutstanding = outstandingPayments.reduce((sum, p) => {
+            return sum + ((p.amount || 0) - (p.paid_amount || 0));
+        }, 0);
+        
+        // Cost breakdown
+        const materialCost = projects.reduce((sum, p) => {
+            return sum + (p.total_cost || 0) * 0.6; // Estimate 60% materials
+        }, 0);
+        const laborCost = projects.reduce((sum, p) => {
+            return sum + (p.total_cost || 0) * 0.4; // Estimate 40% labor
+        }, 0);
+        
+        res.json({
+            success: true,
+            data: {
+                financial: {
+                    totalRevenue: Math.round(totalRevenue),
+                    totalCost: Math.round(totalCost),
+                    profit: Math.round(profit),
+                    profitMargin: parseFloat(profitMargin),
+                    totalOutstanding: Math.round(totalOutstanding),
+                },
+                projects: {
+                    total: projects.length,
+                    active: projects.filter(p => p.status === 'In Progress').length,
+                    completed: projects.filter(p => p.status === 'Completed').length,
+                    planning: projects.filter(p => p.status === 'Planning').length,
+                    statusDistribution: statusCount,
+                },
+                resources: {
+                    totalMaterials: materials.length,
+                    totalWorkers: workers.length,
+                },
+                costs: {
+                    materialCost: Math.round(materialCost),
+                    laborCost: Math.round(laborCost),
+                },
+                monthlyRevenue,
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== NOTIFICATION ENDPOINTS ====================
+
+// Get user notifications
+app.get('/api/notifications', authenticateToken, async (req, res, next) => {
+    try {
+        const { read, limit = 50 } = req.query;
+        let query = { user_id: req.user.userId || req.user.id };
+        if (read !== undefined) {
+            query.read = read === 'true';
+        }
+        
+        const notifications = await Notification.find(query)
+            .sort({ createdAt: -1 })
+            .limit(parseInt(limit));
+        
+        const normalized = notifications.map(n => {
+            const obj = n.toObject();
+            obj.id = obj._id.toString();
+            delete obj._id;
+            return obj;
+        });
+        
+        const unreadCount = await Notification.countDocuments({ user_id: req.user.userId || req.user.id, read: false });
+        
+        res.json({
+            success: true,
+            data: normalized,
+            unreadCount
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Mark notification as read
+app.put('/api/notifications/:id/read', authenticateToken, async (req, res, next) => {
+    try {
+        const notification = await Notification.findOne({
+            _id: req.params.id,
+            user_id: req.user.userId || req.user.id
+        });
+        
+        if (!notification) {
+            return res.status(404).json({ success: false, message: 'Notification not found' });
+        }
+        
+        notification.read = true;
+        await notification.save();
+        
+        res.json({ success: true });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Mark all notifications as read
+app.put('/api/notifications/read-all', authenticateToken, async (req, res, next) => {
+    try {
+        await Notification.updateMany(
+            { user_id: req.user.userId || req.user.id, read: false },
+            { read: true }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== GLOBAL SEARCH ENDPOINT ====================
+
+app.get('/api/search', authenticateToken, async (req, res, next) => {
+    try {
+        const { q } = req.query;
+        if (!q || q.length < 2) {
+            return res.json({
+                success: true,
+                data: { projects: [], materials: [], workers: [] }
+            });
+        }
+        
+        const searchRegex = new RegExp(q, 'i');
+        
+        // Search projects
+        const projects = await Project.find({
+            $or: [
+                { project_name: searchRegex },
+                { customer_name: searchRegex },
+                { customer_phone: searchRegex },
+                { site_address: searchRegex },
+            ]
+        }).limit(10).select('project_name customer_name status customer_phone');
+        
+        // Search materials
+        const materials = await Material.find({
+            name: searchRegex
+        }).limit(10).select('name price_per_unit unit category_id').populate('category_id', 'name');
+        
+        // Search workers
+        const workers = await Worker.find({
+            $or: [
+                { name: searchRegex },
+                { phone_number: searchRegex },
+                { role: searchRegex },
+            ]
+        }).limit(10).select('name role daily_wage phone_number');
+        
+        const normalizeArray = (arr) => arr.map(item => {
+            const obj = item.toObject();
+            obj.id = obj._id.toString();
+            delete obj._id;
+            return obj;
+        });
+        
+        res.json({
+            success: true,
+            data: {
+                projects: normalizeArray(projects),
+                materials: normalizeArray(materials),
+                workers: normalizeArray(workers),
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== ENHANCED DOCUMENT UPLOAD ====================
+
+// Upload document (multipart)
+app.post('/api/documents/upload', authenticateToken, documentUpload.single('file'), async (req, res, next) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No file uploaded' });
+        }
+        
+        const { project_id, document_type, description } = req.body;
+        
+        if (!project_id) {
+            // Delete uploaded file if validation fails
+            fs.unlinkSync(req.file.path);
+            return res.status(400).json({ success: false, message: 'Project ID is required' });
+        }
+        
+        const fileUrl = `/uploads/documents/${req.file.filename}`;
+        
+        const document = new Document({
+            project_id: project_id,
+            document_type: document_type || 'Other',
+            file_url: fileUrl,
+            file_name: req.file.originalname,
+            file_size: req.file.size,
+            description: description,
+            uploaded_by: req.user.userId || req.user.id,
+        });
+        
+        await document.save();
+        
+        const docObj = document.toObject();
+        docObj.id = docObj._id.toString();
+        delete docObj._id;
+        
+        res.json({ success: true, data: docObj });
+    } catch (err) {
+        // Delete file if save fails
+        if (req.file && req.file.path) {
+            try {
+                fs.unlinkSync(req.file.path);
+            } catch (e) {
+                logger.error('Failed to delete uploaded file:', e);
+            }
+        }
+        next(err);
+    }
+});
+
+// ==================== SCHEDULED TASKS (CRON JOBS) ====================
+
+// Check for due payments daily at 9 AM
+cron.schedule('0 9 * * *', async () => {
+    try {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(0, 0, 0, 0);
+        
+        const dayAfter = new Date(tomorrow);
+        dayAfter.setDate(dayAfter.getDate() + 1);
+        
+        // Find payments due tomorrow
+        const duePayments = await Payment.find({
+            due_date: { $gte: tomorrow, $lt: dayAfter },
+            status: { $ne: 'Paid' }
+        }).populate('project_id');
+        
+        // Create notifications
+        for (const payment of duePayments) {
+            if (payment.project_id && payment.project_id.createdBy) {
+                await Notification.create({
+                    user_id: payment.project_id.createdBy,
+                    type: 'payment_reminder',
+                    title: 'Payment Due Tomorrow',
+                    message: `Payment of ₹${payment.amount} is due tomorrow for project ${payment.project_id.project_name}`,
+                    related_id: payment._id,
+                    related_type: 'payment',
+                    read: false
+                });
+            }
+        }
+        
+        logger.info(`Created ${duePayments.length} payment reminders`);
+    } catch (err) {
+        logger.error('Payment reminder cron error:', err);
+    }
+});
+
+// Check for overdue payments daily at 9 AM
+cron.schedule('0 9 * * *', async () => {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Find overdue payments
+        const overduePayments = await Payment.find({
+            due_date: { $lt: today },
+            status: { $ne: 'Paid' }
+        }).populate('project_id');
+        
+        // Update status and create notifications
+        for (const payment of overduePayments) {
+            if (payment.status !== 'Overdue') {
+                payment.status = 'Overdue';
+                await payment.save();
+            }
+            
+            if (payment.project_id && payment.project_id.createdBy) {
+                await Notification.create({
+                    user_id: payment.project_id.createdBy,
+                    type: 'payment_reminder',
+                    title: 'Overdue Payment',
+                    message: `Payment of ₹${payment.amount} is overdue for project ${payment.project_id.project_name}`,
+                    related_id: payment._id,
+                    related_type: 'payment',
+                    read: false
+                });
+            }
+        }
+        
+        logger.info(`Processed ${overduePayments.length} overdue payments`);
+    } catch (err) {
+        logger.error('Overdue payment cron error:', err);
+    }
+});
+
+// Central error handler (must be last)
+app.use(errorHandler);
+
+app.listen(config.port, () => {
+    logger.info(`Server running on port ${config.port}`, { env: config.nodeEnv });
+    logger.info('Scheduled tasks initialized');
 });
