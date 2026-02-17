@@ -140,6 +140,7 @@ const quotationSchema = new mongoose.Schema({
     material_cost: { type: Number, default: 0 },
     labor_cost: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 },
+    gst_rate: { type: Number, default: 18 },
     gst_amount: { type: Number, default: 0 },
     grand_total: { type: Number, default: 0 },
     status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
@@ -798,12 +799,16 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res, next) =>
 
         const quotation_number = 'QTN-' + Date.now().toString().slice(-8);
 
+        // Get the GST rate value to store with quotation
+        const gstRateValue = gstSetting ? gstSetting.value : 18;
+        
         const newQuotation = new Quotation({
             project_id,
             quotation_number,
             material_cost,
             labor_cost,
             total_cost,
+            gst_rate: gstRateValue,
             gst_amount,
             grand_total
         });
