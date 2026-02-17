@@ -42,16 +42,16 @@ const userSchema = new mongoose.Schema({
     profilePhoto: String,
     createdAt: { type: Date, default: Date.now }
 });
-userSchema.index({ phone: 1 });
+// Only add createdAt index, phone already has unique index
 userSchema.index({ createdAt: -1 });
-const User = mongoose.model('User', userSchema);
+const User = mongoose.models.User || mongoose.model('User', userSchema);
 
 // Material Category Model
 const materialCategorySchema = new mongoose.Schema({
     name: { type: String, required: true },
     description: String
 });
-const MaterialCategory = mongoose.model('MaterialCategory', materialCategorySchema);
+const MaterialCategory = mongoose.models.MaterialCategory || mongoose.model('MaterialCategory', materialCategorySchema);
 
 // Material Model
 const materialSchema = new mongoose.Schema({
@@ -63,7 +63,7 @@ const materialSchema = new mongoose.Schema({
     total_stock: { type: Number, default: 100 },
     createdAt: { type: Date, default: Date.now }
 });
-const Material = mongoose.model('Material', materialSchema);
+const Material = mongoose.models.Material || mongoose.model('Material', materialSchema);
 
 // Worker Model
 const workerSchema = new mongoose.Schema({
@@ -74,7 +74,7 @@ const workerSchema = new mongoose.Schema({
     location: String,
     createdAt: { type: Date, default: Date.now }
 });
-const Worker = mongoose.model('Worker', workerSchema);
+const Worker = mongoose.models.Worker || mongoose.model('Worker', workerSchema);
 
 // Project Model
 const projectSchema = new mongoose.Schema({
@@ -96,7 +96,7 @@ projectSchema.index({ createdBy: 1 });
 projectSchema.index({ status: 1 });
 projectSchema.index({ createdAt: -1 });
 projectSchema.index({ customer_phone: 1 });
-const Project = mongoose.model('Project', projectSchema);
+const Project = mongoose.models.Project || mongoose.model('Project', projectSchema);
 
 // Project Material Model
 const projectMaterialSchema = new mongoose.Schema({
@@ -107,7 +107,7 @@ const projectMaterialSchema = new mongoose.Schema({
     total_cost: { type: Number, default: 0 }
 });
 projectMaterialSchema.index({ project_id: 1 });
-const ProjectMaterial = mongoose.model('ProjectMaterial', projectMaterialSchema);
+const ProjectMaterial = mongoose.models.ProjectMaterial || mongoose.model('ProjectMaterial', projectMaterialSchema);
 
 // Project Worker Model
 const projectWorkerSchema = new mongoose.Schema({
@@ -118,7 +118,7 @@ const projectWorkerSchema = new mongoose.Schema({
     total_wage: { type: Number, default: 0 }
 });
 projectWorkerSchema.index({ project_id: 1 });
-const ProjectWorker = mongoose.model('ProjectWorker', projectWorkerSchema);
+const ProjectWorker = mongoose.models.ProjectWorker || mongoose.model('ProjectWorker', projectWorkerSchema);
 
 // Quotation Model
 const quotationSchema = new mongoose.Schema({
@@ -134,7 +134,7 @@ const quotationSchema = new mongoose.Schema({
 });
 quotationSchema.index({ project_id: 1 });
 quotationSchema.index({ createdAt: -1 });
-const Quotation = mongoose.model('Quotation', quotationSchema);
+const Quotation = mongoose.models.Quotation || mongoose.model('Quotation', quotationSchema);
 
 // ========== NEW MODELS FOR ADVANCED FLOW ==========
 
@@ -144,7 +144,7 @@ const stageMasterSchema = new mongoose.Schema({
     description: String,
     order: { type: Number, default: 0 }
 });
-const StageMaster = mongoose.model('StageMaster', stageMasterSchema);
+const StageMaster = mongoose.models.StageMaster || mongoose.model('StageMaster', stageMasterSchema);
 
 // Project Stage (stage-wise tracking)
 const projectStageSchema = new mongoose.Schema({
@@ -159,7 +159,7 @@ const projectStageSchema = new mongoose.Schema({
     total_cost: { type: Number, default: 0 }
 });
 projectStageSchema.index({ project_id: 1, stage_order: 1 });
-const ProjectStage = mongoose.model('ProjectStage', projectStageSchema);
+const ProjectStage = mongoose.models.ProjectStage || mongoose.model('ProjectStage', projectStageSchema);
 
 // Stage Materials
 const stageMaterialSchema = new mongoose.Schema({
@@ -171,7 +171,7 @@ const stageMaterialSchema = new mongoose.Schema({
     unit_price: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
-const StageMaterial = mongoose.model('StageMaterial', stageMaterialSchema);
+const StageMaterial = mongoose.models.StageMaterial || mongoose.model('StageMaterial', stageMaterialSchema);
 
 // Stage Workers
 const stageWorkerSchema = new mongoose.Schema({
@@ -184,7 +184,7 @@ const stageWorkerSchema = new mongoose.Schema({
     daily_wage: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
-const StageWorker = mongoose.model('StageWorker', stageWorkerSchema);
+const StageWorker = mongoose.models.StageWorker || mongoose.model('StageWorker', stageWorkerSchema);
 
 // Daily Work Entry
 const dailyEntrySchema = new mongoose.Schema({
@@ -202,7 +202,7 @@ const dailyEntrySchema = new mongoose.Schema({
     total_daily_cost: { type: Number, default: 0 },
     notes: String
 });
-const DailyEntry = mongoose.model('DailyEntry', dailyEntrySchema);
+const DailyEntry = mongoose.models.DailyEntry || mongoose.model('DailyEntry', dailyEntrySchema);
 
 // Payment Milestone
 const paymentSchema = new mongoose.Schema({
@@ -220,7 +220,7 @@ const paymentSchema = new mongoose.Schema({
 });
 paymentSchema.index({ project_id: 1 });
 paymentSchema.index({ due_date: 1 });
-const Payment = mongoose.model('Payment', paymentSchema);
+const Payment = mongoose.models.Payment || mongoose.model('Payment', paymentSchema);
 
 // Document
 const documentSchema = new mongoose.Schema({
@@ -234,7 +234,7 @@ const documentSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 documentSchema.index({ project_id: 1, createdAt: -1 });
-const Document = mongoose.model('Document', documentSchema);
+const Document = mongoose.models.Document || mongoose.model('Document', documentSchema);
 
 // Notification Model
 const notificationSchema = new mongoose.Schema({
@@ -248,7 +248,7 @@ const notificationSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 notificationSchema.index({ user_id: 1, read: 1, createdAt: -1 });
-const Notification = mongoose.model('Notification', notificationSchema);
+const Notification = mongoose.models.Notification || mongoose.model('Notification', notificationSchema);
 
 // Quotation Version
 const quotationVersionSchema = new mongoose.Schema({
@@ -265,7 +265,7 @@ const quotationVersionSchema = new mongoose.Schema({
     notes: String,
     createdAt: { type: Date, default: Date.now }
 });
-const QuotationVersion = mongoose.model('QuotationVersion', quotationVersionSchema);
+const QuotationVersion = mongoose.models.QuotationVersion || mongoose.model('QuotationVersion', quotationVersionSchema);
 
 // Quotation Material Model
 const quotationMaterialSchema = new mongoose.Schema({
@@ -275,7 +275,7 @@ const quotationMaterialSchema = new mongoose.Schema({
     unit_price: Number,
     total_cost: Number
 });
-const QuotationMaterial = mongoose.model('QuotationMaterial', quotationMaterialSchema);
+const QuotationMaterial = mongoose.models.QuotationMaterial || mongoose.model('QuotationMaterial', quotationMaterialSchema);
 
 // Quotation Worker Model
 const quotationWorkerSchema = new mongoose.Schema({
@@ -285,7 +285,7 @@ const quotationWorkerSchema = new mongoose.Schema({
     daily_wage: Number,
     total_cost: Number
 });
-const QuotationWorker = mongoose.model('QuotationWorker', quotationWorkerSchema);
+const QuotationWorker = mongoose.models.QuotationWorker || mongoose.model('QuotationWorker', quotationWorkerSchema);
 
 // ==================== MULTER CONFIGURATION ====================
 // Create uploads directory if it doesn't exist
@@ -474,7 +474,7 @@ const appSettingsSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
     value: mongoose.Schema.Types.Mixed
 });
-const AppSetting = mongoose.model('AppSetting', appSettingsSchema);
+const AppSetting = mongoose.models.AppSetting || mongoose.model('AppSetting', appSettingsSchema);
 
 // Get app settings
 app.get('/api/settings', authenticateToken, async (req, res, next) => {
