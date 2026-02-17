@@ -342,7 +342,7 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const newUser = new User({ name, phone, password, role: role || 'customer' });
         await newUser.save();
-        res.json({ id: newUser._id, message: 'User registered successfully' });
+        res.json({ success: true, id: newUser._id, message: 'User registered successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
