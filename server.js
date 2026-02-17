@@ -16,6 +16,9 @@ const { authLimiter } = require('./middleware/rateLimit');
 const { validatePhone, validatePassword } = require('./utils/validation');
 const logger = require('./utils/logger');
 
+// Check if we're in a serverless environment (Vercel, AWS Lambda, etc.)
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || !fs.existsSync || typeof __dirname === 'undefined';
+
 const app = express();
 // CORS - allow all origins for now (restrict in production)
 app.use(cors({
@@ -24,7 +27,17 @@ app.use(cors({
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Static file serving only in non-serverless environments
+if (!isServerless && fs.existsSync && typeof __dirname !== 'undefined') {
+    try {
+        const uploadsPath = path.join(__dirname, 'uploads');
+        if (fs.existsSync(uploadsPath)) {
+            app.use('/uploads', express.static(uploadsPath));
+        }
+    } catch (e) {
+        // Ignore if uploads directory doesn't exist (serverless)
+    }
+}
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || config.mongodbUri || '')
@@ -288,27 +301,12 @@ const quotationWorkerSchema = new mongoose.Schema({
 const QuotationWorker = mongoose.models.QuotationWorker || mongoose.model('QuotationWorker', quotationWorkerSchema);
 
 // ==================== MULTER CONFIGURATION ====================
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads', 'documents');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Disk storage for documents (better for larger files)
-const documentStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadsDir);
-    },
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-    }
-});
-
-// Memory storage for profile photos (smaller files)
+// Memory storage for all uploads (serverless-compatible)
+// For Vercel/serverless, we can't use disk storage, so we use memory and store as base64
 const profileStorage = multer.memoryStorage();
+const documentStorage = multer.memoryStorage(); // Changed to memory for serverless compatibility
 
-// Document upload (multipart)
+// Document upload (multipart) - using memory storage for serverless compatibility
 const documentUpload = multer({
     storage: documentStorage,
     limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
@@ -1827,7 +1825,7 @@ app.get('/api/search', authenticateToken, async (req, res, next) => {
 
 // ==================== ENHANCED DOCUMENT UPLOAD ====================
 
-// Upload document (multipart)
+// Upload document (multipart) - Serverless compatible (memory storage)
 app.post('/api/documents/upload', authenticateToken, documentUpload.single('file'), async (req, res, next) => {
     try {
         if (!req.file) {
@@ -1837,17 +1835,17 @@ app.post('/api/documents/upload', authenticateToken, documentUpload.single('file
         const { project_id, document_type, description } = req.body;
         
         if (!project_id) {
-            // Delete uploaded file if validation fails
-            fs.unlinkSync(req.file.path);
             return res.status(400).json({ success: false, message: 'Project ID is required' });
         }
         
-        const fileUrl = `/uploads/documents/${req.file.filename}`;
+        // Convert file to base64 for serverless storage (like profile photos)
+        const base64File = req.file.buffer.toString('base64');
+        const fileDataUri = `data:${req.file.mimetype};base64,${base64File}`;
         
         const document = new Document({
             project_id: project_id,
             document_type: document_type || 'Other',
-            file_url: fileUrl,
+            file_url: fileDataUri, // Store as base64 data URI (serverless compatible)
             file_name: req.file.originalname,
             file_size: req.file.size,
             description: description,
@@ -1862,14 +1860,6 @@ app.post('/api/documents/upload', authenticateToken, documentUpload.single('file
         
         res.json({ success: true, data: docObj });
     } catch (err) {
-        // Delete file if save fails
-        if (req.file && req.file.path) {
-            try {
-                fs.unlinkSync(req.file.path);
-            } catch (e) {
-                logger.error('Failed to delete uploaded file:', e);
-            }
-        }
         next(err);
     }
 });
