@@ -79,6 +79,8 @@ const materialSchema = new mongoose.Schema({
     total_stock: { type: Number, default: 100 },
     createdAt: { type: Date, default: Date.now }
 });
+materialSchema.index({ category_id: 1 });
+materialSchema.index({ name: 1 });
 const Material = mongoose.models.Material || mongoose.model('Material', materialSchema);
 
 // Worker Model
@@ -90,6 +92,8 @@ const workerSchema = new mongoose.Schema({
     location: String,
     createdAt: { type: Date, default: Date.now }
 });
+workerSchema.index({ name: 1 });
+workerSchema.index({ createdAt: -1 });
 const Worker = mongoose.models.Worker || mongoose.model('Worker', workerSchema);
 
 // Project Model
@@ -188,6 +192,8 @@ const stageMaterialSchema = new mongoose.Schema({
     unit_price: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
+stageMaterialSchema.index({ project_stage_id: 1 });
+stageMaterialSchema.index({ project_id: 1 });
 const StageMaterial = mongoose.models.StageMaterial || mongoose.model('StageMaterial', stageMaterialSchema);
 
 // Stage Workers
@@ -201,6 +207,8 @@ const stageWorkerSchema = new mongoose.Schema({
     daily_wage: { type: Number, default: 0 },
     total_cost: { type: Number, default: 0 }
 });
+stageWorkerSchema.index({ project_stage_id: 1 });
+stageWorkerSchema.index({ project_id: 1 });
 const StageWorker = mongoose.models.StageWorker || mongoose.model('StageWorker', stageWorkerSchema);
 
 // Daily Work Entry
@@ -219,6 +227,7 @@ const dailyEntrySchema = new mongoose.Schema({
     total_daily_cost: { type: Number, default: 0 },
     notes: String
 });
+dailyEntrySchema.index({ project_id: 1, date: -1 });
 const DailyEntry = mongoose.models.DailyEntry || mongoose.model('DailyEntry', dailyEntrySchema);
 
 // Payment Milestone
@@ -292,6 +301,7 @@ const quotationMaterialSchema = new mongoose.Schema({
     unit_price: Number,
     total_cost: Number
 });
+quotationMaterialSchema.index({ quotation_id: 1 });
 const QuotationMaterial = mongoose.models.QuotationMaterial || mongoose.model('QuotationMaterial', quotationMaterialSchema);
 
 // Quotation Worker Model
@@ -302,6 +312,7 @@ const quotationWorkerSchema = new mongoose.Schema({
     daily_wage: Number,
     total_cost: Number
 });
+quotationWorkerSchema.index({ quotation_id: 1 });
 const QuotationWorker = mongoose.models.QuotationWorker || mongoose.model('QuotationWorker', quotationWorkerSchema);
 
 // ==================== MULTER CONFIGURATION ====================
@@ -616,8 +627,13 @@ app.get('/api/projects', authenticateToken, async (req, res, next) => {
         const projects = await Project.find(query).sort(sortQuery).skip(skip).limit(limit);
 
         // Add stage progress to each project
-        const projectsWithProgress = await Promise.all(projects.map(async (project) => {
-            const stages = await ProjectStage.find({ project_id: project._id }).sort({ stage_order: 1 });
+        // Batch fetch all stages for the current list of projects to avoid O(N) queries
+        const projectIds = projects.map(p => p._id);
+        const allStages = await ProjectStage.find({ project_id: { $in: projectIds } }).sort({ stage_order: 1 });
+
+        const projectsWithProgress = projects.map((project) => {
+            // Filter stages for this specific project from the bulk result
+            const stages = allStages.filter(s => s.project_id.toString() === project._id.toString());
 
             const totalStages = stages.length;
             const completedStages = stages.filter(s => s.status === 'Completed').length;
@@ -635,7 +651,7 @@ app.get('/api/projects', authenticateToken, async (req, res, next) => {
                 completed_stages: completedStages,
                 current_stage_name: currentStage ? currentStage.stage_name : (project.status || 'Planning')
             };
-        }));
+        });
 
         res.json({
             success: true,
@@ -986,7 +1002,16 @@ app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, r
 
 app.post('/api/seed', async (req, res, next) => {
     try {
-        // Clear existing data first
+        // Safety check: Only allow seeding in non-production OR if explicitly allowed via env var
+        const isProduction = process.env.NODE_ENV === 'production';
+        const seedAllowed = process.env.SEED_ALLOWED === 'true';
+
+        if (isProduction && !seedAllowed) {
+            return res.status(403).json({
+                success: false,
+                message: 'Seeding is disabled in production environments for safety.'
+            });
+        }
         await User.deleteMany({});
         await MaterialCategory.deleteMany({});
         await Material.deleteMany({});
@@ -1699,83 +1724,110 @@ app.get('/api/health', async (req, res) => {
 // Get analytics overview
 app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => {
     try {
-        const projects = await Project.find();
-        const materials = await Material.find();
-        const workers = await Worker.find();
-        const payments = await Payment.find({ status: 'Paid' });
-
-        // Calculate financial stats
-        const totalRevenue = projects.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
-        const totalCost = projects.reduce((sum, p) => sum + (p.total_cost || 0), 0);
-        const profit = totalRevenue - totalCost;
-        const profitMargin = totalCost > 0 ? ((profit / totalCost) * 100).toFixed(2) : 0;
-
-        // Monthly revenue (last 6 months)
-        const monthlyRevenue = [];
         const now = new Date();
+        const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+
+        // 1. Project stats & Financials (Single aggregation on Projects)
+        const projectStats = await Project.aggregate([
+            {
+                $group: {
+                    _id: null,
+                    total: { $sum: 1 },
+                    totalRevenue: { $sum: '$paid_amount' },
+                    totalCost: { $sum: '$total_cost' },
+                    active: { $sum: { $cond: [{ $eq: ['$status', 'In Progress'] }, 1, 0] } },
+                    completed: { $sum: { $cond: [{ $eq: ['$status', 'Completed'] }, 1, 0] } },
+                    planning: { $sum: { $cond: [{ $eq: ['$status', 'Planning'] }, 1, 0] } },
+                    pending: { $sum: { $cond: [{ $eq: ['$status', 'Pending'] }, 1, 0] } }
+                }
+            }
+        ]);
+
+        const stats = projectStats[0] || { total: 0, totalRevenue: 0, totalCost: 0, active: 0, completed: 0, planning: 0, pending: 0 };
+
+        // 2. Monthly Revenue (Single aggregation on Payments)
+        const monthlyRevenueRaw = await Payment.aggregate([
+            {
+                $match: {
+                    status: 'Paid',
+                    payment_date: { $gte: sixMonthsAgo }
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        year: { $year: '$payment_date' },
+                        month: { $month: '$payment_date' }
+                    },
+                    revenue: { $sum: '$paid_amount' }
+                }
+            },
+            { $sort: { '_id.year': 1, '_id.month': 1 } }
+        ]);
+
+        // Format monthly revenue for the frontend (last 6 months including zeroes)
+        const monthlyRevenue = [];
         for (let i = 5; i >= 0; i--) {
             const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
-            const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59);
+            const month = date.getMonth() + 1;
+            const year = date.getFullYear();
 
-            const monthPayments = await Payment.find({
-                payment_date: { $gte: monthStart, $lte: monthEnd },
-                status: 'Paid'
-            });
-            const revenue = monthPayments.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+            const found = monthlyRevenueRaw.find(m => m._id.month === month && m._id.year === year);
             monthlyRevenue.push({
                 month: date.toLocaleString('default', { month: 'short', year: 'numeric' }),
-                revenue: Math.round(revenue),
+                revenue: Math.round(found ? found.revenue : 0),
                 monthIndex: date.getMonth()
             });
         }
 
-        // Project status distribution
-        const statusCount = {
-            'Planning': projects.filter(p => p.status === 'Planning').length,
-            'In Progress': projects.filter(p => p.status === 'In Progress').length,
-            'Completed': projects.filter(p => p.status === 'Completed').length,
-            'Pending': projects.filter(p => p.status === 'Pending').length,
-        };
+        // 3. Resource Counts
+        const totalMaterials = await Material.countDocuments();
+        const totalWorkers = await Worker.countDocuments();
 
-        // Outstanding payments
-        const outstandingPayments = await Payment.find({ status: { $in: ['Pending', 'Partial'] } });
-        const totalOutstanding = outstandingPayments.reduce((sum, p) => {
-            return sum + ((p.amount || 0) - (p.paid_amount || 0));
-        }, 0);
+        // 4. Outstanding Payments
+        const outstandingData = await Payment.aggregate([
+            { $match: { status: { $in: ['Pending', 'Partial'] } } },
+            {
+                $group: {
+                    _id: null,
+                    totalOutstanding: { $sum: { $subtract: ['$amount', '$paid_amount'] } }
+                }
+            }
+        ]);
 
-        // Cost breakdown
-        const materialCost = projects.reduce((sum, p) => {
-            return sum + (p.total_cost || 0) * 0.6; // Estimate 60% materials
-        }, 0);
-        const laborCost = projects.reduce((sum, p) => {
-            return sum + (p.total_cost || 0) * 0.4; // Estimate 40% labor
-        }, 0);
+        const totalOutstanding = outstandingData[0] ? outstandingData[0].totalOutstanding : 0;
+        const profit = stats.totalRevenue - stats.totalCost;
+        const profitMargin = stats.totalCost > 0 ? ((profit / stats.totalCost) * 100).toFixed(2) : 0;
 
         res.json({
             success: true,
             data: {
                 financial: {
-                    totalRevenue: Math.round(totalRevenue),
-                    totalCost: Math.round(totalCost),
+                    totalRevenue: Math.round(stats.totalRevenue),
+                    totalCost: Math.round(stats.totalCost),
                     profit: Math.round(profit),
                     profitMargin: parseFloat(profitMargin),
                     totalOutstanding: Math.round(totalOutstanding),
                 },
                 projects: {
-                    total: projects.length,
-                    active: projects.filter(p => p.status === 'In Progress').length,
-                    completed: projects.filter(p => p.status === 'Completed').length,
-                    planning: projects.filter(p => p.status === 'Planning').length,
-                    statusDistribution: statusCount,
+                    total: stats.total,
+                    active: stats.active,
+                    completed: stats.completed,
+                    planning: stats.planning,
+                    statusDistribution: {
+                        'Planning': stats.planning,
+                        'In Progress': stats.active,
+                        'Completed': stats.completed,
+                        'Pending': stats.pending
+                    },
                 },
                 resources: {
-                    totalMaterials: materials.length,
-                    totalWorkers: workers.length,
+                    totalMaterials,
+                    totalWorkers,
                 },
                 costs: {
-                    materialCost: Math.round(materialCost),
-                    laborCost: Math.round(laborCost),
+                    materialCost: Math.round(stats.totalCost * 0.6), // Estimate 60%
+                    laborCost: Math.round(stats.totalCost * 0.4), // Estimate 40%
                 },
                 monthlyRevenue,
             }
