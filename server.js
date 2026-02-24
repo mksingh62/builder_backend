@@ -22,8 +22,8 @@ const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME 
 const app = express();
 // CORS - allow all origins for now (restrict in production)
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
-  credentials: true
+    origin: process.env.CORS_ORIGIN || '*',
+    credentials: true
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
@@ -48,10 +48,13 @@ mongoose.connect(process.env.MONGODB_URI || config.mongodbUri || '')
 
 // User Model
 const userSchema = new mongoose.Schema({
-    name: { type: String, required: true },
+    name: { type: String }, // Optional during initial OTP sign-up
     phone: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    role: { type: String, enum: ['admin', 'staff', 'customer'], default: 'customer' },
+    password: { type: String }, // Optional for OTP-only accounts
+    role: { type: String, enum: ['admin', 'staff', 'customer', 'builder', 'supervisor'], default: 'builder' },
+    companyName: String,
+    region: String,
+    gstNumber: String,
     profilePhoto: String,
     createdAt: { type: Date, default: Date.now }
 });
@@ -338,7 +341,75 @@ const upload = multer({
     }
 });
 
+// ==================== MULTER CONFIGURATION ====================
+// ... (existing multer config)
+
+// In-memory OTP storage for simulation
+const otpCache = new Map();
+
 // ==================== AUTH ROUTES ====================
+
+// Send OTP
+app.post('/api/auth/send-otp', async (req, res, next) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ success: false, message: 'Phone number is required' });
+
+        // Generate a simple 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Store in cache for 5 minutes
+        otpCache.set(phone, { otp, expires: Date.now() + 5 * 60000 });
+
+        console.log(`[OTP DEBUG] Sent OTP ${otp} to ${phone}`);
+
+        res.json({ success: true, message: 'OTP sent successfully (Simulated)', otp: (process.env.NODE_ENV !== 'production' ? otp : undefined) });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Verify OTP
+app.post('/api/auth/verify-otp', async (req, res, next) => {
+    try {
+        const { phone, otp, role } = req.body;
+        if (!phone || !otp) return res.status(400).json({ success: false, message: 'Phone and OTP are required' });
+
+        const cached = otpCache.get(phone);
+
+        // Simulation: Allow '123456' as a universal test OTP
+        if (otp !== '123456' && (!cached || cached.otp !== otp || Date.now() > cached.expires)) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+        }
+
+        // Clear OTP after successful use
+        otpCache.delete(phone);
+
+        // Find or create user
+        let user = await User.findOne({ phone });
+        let isNew = false;
+        if (!user) {
+            user = new User({ phone, role: role || 'builder' });
+            await user.save();
+            isNew = true;
+        }
+
+        const token = jwt.sign(
+            { id: user._id, phone: user.phone, role: user.role },
+            config.jwtSecret,
+            { expiresIn: config.jwtExpiresIn }
+        );
+
+        res.json({
+            success: true,
+            token,
+            isNew,
+            user: { id: user._id, name: user.name, phone: user.phone, role: user.role }
+        });
+    } catch (err) {
+        next(err);
+    }
+});
 
 // Login
 app.post('/api/auth/login', authLimiter, async (req, res, next) => {
@@ -404,11 +475,19 @@ app.get('/api/auth/profile', authenticateToken, async (req, res, next) => {
     } catch (err) { next(err); }
 });
 
-// Update user profile
+// Update user profile (Business Setup)
 app.put('/api/auth/profile', authenticateToken, async (req, res, next) => {
     try {
-        const { name, phone } = req.body;
-        const user = await User.findByIdAndUpdate(req.user.id, { name, phone }, { new: true }).select('-password');
+        const { name, phone, companyName, region, gstNumber, role } = req.body;
+        const updateData = {};
+        if (name) updateData.name = name;
+        if (phone) updateData.phone = phone;
+        if (companyName) updateData.companyName = companyName;
+        if (region) updateData.region = region;
+        if (gstNumber) updateData.gstNumber = gstNumber;
+        if (role) updateData.role = role;
+
+        const user = await User.findByIdAndUpdate(req.user.id, updateData, { new: true }).select('-password');
         res.json({ success: true, user });
     } catch (err) { next(err); }
 });
@@ -591,10 +670,10 @@ app.post('/api/projects', authenticateToken, async (req, res, next) => {
         if (!project_name) {
             return res.status(400).json({ success: false, message: 'Project name is required' });
         }
-        
+
         // Auto-set customer_phone if user is customer
         const finalCustomerPhone = customer_phone || (req.user.role === 'customer' ? req.user.phone : null);
-        
+
         const newProject = new Project({
             project_name,
             customer_name,
@@ -605,7 +684,7 @@ app.post('/api/projects', authenticateToken, async (req, res, next) => {
             createdBy: req.user.id
         });
         await newProject.save();
-        
+
         // Create default stages from StageMaster if project is created
         const defaultStages = await StageMaster.find().sort({ order: 1 });
         if (defaultStages.length > 0) {
@@ -618,7 +697,7 @@ app.post('/api/projects', authenticateToken, async (req, res, next) => {
                 });
             }
         }
-        
+
         const projectObj = newProject.toObject();
         projectObj.id = projectObj._id.toString();
         delete projectObj._id;
@@ -801,7 +880,7 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res, next) =>
 
         // Get the GST rate value to store with quotation
         const gstRateValue = gstSetting ? gstSetting.value : 18;
-        
+
         const newQuotation = new Quotation({
             project_id,
             quotation_number,
@@ -1057,10 +1136,10 @@ app.post('/api/seed', async (req, res, next) => {
         // Create App Settings
         await AppSetting.create([
             { key: 'gst_rate', value: 18 },
-            { key: 'company_name', value: 'Builder Site Construction' },
+            { key: 'company_name', value: 'BuildTrack Construction' },
             { key: 'company_address', value: '123 Construction Road, Mumbai-400001' },
             { key: 'company_phone', value: '+91-1234567890' },
-            { key: 'company_email', value: 'info@buildersite.com' }
+            { key: 'company_email', value: 'info@buildtrack.com' }
         ]);
 
         res.json({
@@ -1166,7 +1245,7 @@ app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res, n
 app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
         const { workers_present, materials_used, extra_expenses, expense_description, notes, date } = req.body;
-        
+
         const dailyEntry = new DailyEntry({
             project_id: req.params.id,
             date: date ? new Date(date) : new Date(),
@@ -1284,7 +1363,7 @@ app.delete('/api/payments/:id', authenticateToken, requireAdmin, async (req, res
         if (!payment) {
             return res.status(404).json({ success: false, message: 'Payment not found' });
         }
-        
+
         // Recalculate project paid_amount after deletion
         const project = await Project.findById(payment.project_id);
         if (project) {
@@ -1293,7 +1372,7 @@ app.delete('/api/payments/:id', authenticateToken, requireAdmin, async (req, res
             project.paid_amount = totalPaid;
             await project.save();
         }
-        
+
         res.status(204).send();
     } catch (err) {
         next(err);
@@ -1585,7 +1664,7 @@ app.get('/api/health', async (req, res) => {
         // Check MongoDB connection
         const dbState = mongoose.connection.readyState;
         const isConnected = dbState === 1; // 1 = connected
-        
+
         if (isConnected) {
             res.status(200).json({
                 success: true,
@@ -1620,13 +1699,13 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
         const materials = await Material.find();
         const workers = await Worker.find();
         const payments = await Payment.find({ status: 'Paid' });
-        
+
         // Calculate financial stats
         const totalRevenue = projects.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
         const totalCost = projects.reduce((sum, p) => sum + (p.total_cost || 0), 0);
         const profit = totalRevenue - totalCost;
         const profitMargin = totalCost > 0 ? ((profit / totalCost) * 100).toFixed(2) : 0;
-        
+
         // Monthly revenue (last 6 months)
         const monthlyRevenue = [];
         const now = new Date();
@@ -1634,7 +1713,7 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
             const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
             const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
             const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59);
-            
+
             const monthPayments = await Payment.find({
                 payment_date: { $gte: monthStart, $lte: monthEnd },
                 status: 'Paid'
@@ -1646,7 +1725,7 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
                 monthIndex: date.getMonth()
             });
         }
-        
+
         // Project status distribution
         const statusCount = {
             'Planning': projects.filter(p => p.status === 'Planning').length,
@@ -1654,13 +1733,13 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
             'Completed': projects.filter(p => p.status === 'Completed').length,
             'Pending': projects.filter(p => p.status === 'Pending').length,
         };
-        
+
         // Outstanding payments
         const outstandingPayments = await Payment.find({ status: { $in: ['Pending', 'Partial'] } });
         const totalOutstanding = outstandingPayments.reduce((sum, p) => {
             return sum + ((p.amount || 0) - (p.paid_amount || 0));
         }, 0);
-        
+
         // Cost breakdown
         const materialCost = projects.reduce((sum, p) => {
             return sum + (p.total_cost || 0) * 0.6; // Estimate 60% materials
@@ -1668,7 +1747,7 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
         const laborCost = projects.reduce((sum, p) => {
             return sum + (p.total_cost || 0) * 0.4; // Estimate 40% labor
         }, 0);
-        
+
         res.json({
             success: true,
             data: {
@@ -1712,20 +1791,20 @@ app.get('/api/notifications', authenticateToken, async (req, res, next) => {
         if (read !== undefined) {
             query.read = read === 'true';
         }
-        
+
         const notifications = await Notification.find(query)
             .sort({ createdAt: -1 })
             .limit(parseInt(limit));
-        
+
         const normalized = notifications.map(n => {
             const obj = n.toObject();
             obj.id = obj._id.toString();
             delete obj._id;
             return obj;
         });
-        
+
         const unreadCount = await Notification.countDocuments({ user_id: req.user.userId || req.user.id, read: false });
-        
+
         res.json({
             success: true,
             data: normalized,
@@ -1743,14 +1822,14 @@ app.put('/api/notifications/:id/read', authenticateToken, async (req, res, next)
             _id: req.params.id,
             user_id: req.user.userId || req.user.id
         });
-        
+
         if (!notification) {
             return res.status(404).json({ success: false, message: 'Notification not found' });
         }
-        
+
         notification.read = true;
         await notification.save();
-        
+
         res.json({ success: true });
     } catch (err) {
         next(err);
@@ -1781,9 +1860,9 @@ app.get('/api/search', authenticateToken, async (req, res, next) => {
                 data: { projects: [], materials: [], workers: [] }
             });
         }
-        
+
         const searchRegex = new RegExp(q, 'i');
-        
+
         // Search projects
         const projects = await Project.find({
             $or: [
@@ -1793,12 +1872,12 @@ app.get('/api/search', authenticateToken, async (req, res, next) => {
                 { site_address: searchRegex },
             ]
         }).limit(10).select('project_name customer_name status customer_phone');
-        
+
         // Search materials
         const materials = await Material.find({
             name: searchRegex
         }).limit(10).select('name price_per_unit unit category_id').populate('category_id', 'name');
-        
+
         // Search workers
         const workers = await Worker.find({
             $or: [
@@ -1807,14 +1886,14 @@ app.get('/api/search', authenticateToken, async (req, res, next) => {
                 { role: searchRegex },
             ]
         }).limit(10).select('name role daily_wage phone_number');
-        
+
         const normalizeArray = (arr) => arr.map(item => {
             const obj = item.toObject();
             obj.id = obj._id.toString();
             delete obj._id;
             return obj;
         });
-        
+
         res.json({
             success: true,
             data: {
@@ -1836,17 +1915,17 @@ app.post('/api/documents/upload', authenticateToken, documentUpload.single('file
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'No file uploaded' });
         }
-        
+
         const { project_id, document_type, description } = req.body;
-        
+
         if (!project_id) {
             return res.status(400).json({ success: false, message: 'Project ID is required' });
         }
-        
+
         // Convert file to base64 for serverless storage (like profile photos)
         const base64File = req.file.buffer.toString('base64');
         const fileDataUri = `data:${req.file.mimetype};base64,${base64File}`;
-        
+
         const document = new Document({
             project_id: project_id,
             document_type: document_type || 'Other',
@@ -1856,13 +1935,13 @@ app.post('/api/documents/upload', authenticateToken, documentUpload.single('file
             description: description,
             uploaded_by: req.user.userId || req.user.id,
         });
-        
+
         await document.save();
-        
+
         const docObj = document.toObject();
         docObj.id = docObj._id.toString();
         delete docObj._id;
-        
+
         res.json({ success: true, data: docObj });
     } catch (err) {
         next(err);
@@ -1877,16 +1956,16 @@ cron.schedule('0 9 * * *', async () => {
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setHours(0, 0, 0, 0);
-        
+
         const dayAfter = new Date(tomorrow);
         dayAfter.setDate(dayAfter.getDate() + 1);
-        
+
         // Find payments due tomorrow
         const duePayments = await Payment.find({
             due_date: { $gte: tomorrow, $lt: dayAfter },
             status: { $ne: 'Paid' }
         }).populate('project_id');
-        
+
         // Create notifications
         for (const payment of duePayments) {
             if (payment.project_id && payment.project_id.createdBy) {
@@ -1901,7 +1980,7 @@ cron.schedule('0 9 * * *', async () => {
                 });
             }
         }
-        
+
         logger.info(`Created ${duePayments.length} payment reminders`);
     } catch (err) {
         logger.error('Payment reminder cron error:', err);
@@ -1913,20 +1992,20 @@ cron.schedule('0 9 * * *', async () => {
     try {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        
+
         // Find overdue payments
         const overduePayments = await Payment.find({
             due_date: { $lt: today },
             status: { $ne: 'Paid' }
         }).populate('project_id');
-        
+
         // Update status and create notifications
         for (const payment of overduePayments) {
             if (payment.status !== 'Overdue') {
                 payment.status = 'Overdue';
                 await payment.save();
             }
-            
+
             if (payment.project_id && payment.project_id.createdBy) {
                 await Notification.create({
                     user_id: payment.project_id.createdBy,
@@ -1939,7 +2018,7 @@ cron.schedule('0 9 * * *', async () => {
                 });
             }
         }
-        
+
         logger.info(`Processed ${overduePayments.length} overdue payments`);
     } catch (err) {
         logger.error('Overdue payment cron error:', err);
