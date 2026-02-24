@@ -110,6 +110,7 @@ const projectSchema = new mongoose.Schema({
     total_cost: { type: Number, default: 0 },
     paid_amount: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    site_photos: [{ type: String }], // Base64 strings for site images
     createdAt: { type: Date, default: Date.now }
 });
 projectSchema.index({ createdBy: 1 });
@@ -686,7 +687,7 @@ app.get('/api/projects/:id', authenticateToken, async (req, res, next) => {
 
 app.post('/api/projects', authenticateToken, async (req, res, next) => {
     try {
-        const { project_name, customer_name, site_address, area_sqft, status, customer_phone } = req.body;
+        const { project_name, customer_name, site_address, area_sqft, status, customer_phone, site_photos } = req.body;
         if (!project_name) {
             return res.status(400).json({ success: false, message: 'Project name is required' });
         }
@@ -701,6 +702,7 @@ app.post('/api/projects', authenticateToken, async (req, res, next) => {
             site_address,
             area_sqft,
             status: status || 'Planning',
+            site_photos: site_photos || [],
             createdBy: req.user.id
         });
         await newProject.save();
