@@ -731,11 +731,18 @@ app.post('/api/projects', authenticateToken, async (req, res, next) => {
 
 app.put('/api/projects/:id', authenticateToken, async (req, res, next) => {
     try {
-        const project = await Project.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const { id } = req.params;
+        const updateData = { ...req.body };
+
+        // Ensure id is not in the update data to avoid Immutable error
+        delete updateData._id;
+        delete updateData.id;
+
+        const project = await Project.findByIdAndUpdate(id, updateData, { new: true });
         if (!project) {
             return res.status(404).json({ success: false, message: 'Project not found' });
         }
-        res.json(project);
+        res.json({ success: true, data: project });
     } catch (err) {
         next(err);
     }
