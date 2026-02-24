@@ -388,9 +388,13 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         // Find or create user
         let user = await User.findOne({ phone });
         let isNew = false;
+
         if (!user) {
             user = new User({ phone, role: role || 'builder' });
             await user.save();
+            isNew = true;
+        } else if (!user.name || user.name.trim() === '') {
+            // User exists but hasn't completed profile setup (no name)
             isNew = true;
         }
 
