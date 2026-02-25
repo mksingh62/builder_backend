@@ -65,8 +65,10 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 // Material Category Model
 const materialCategorySchema = new mongoose.Schema({
     name: { type: String, required: true },
-    description: String
+    description: String,
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 });
+materialCategorySchema.index({ createdBy: 1 });
 const MaterialCategory = mongoose.models.MaterialCategory || mongoose.model('MaterialCategory', materialCategorySchema);
 
 // Material Model
@@ -77,10 +79,12 @@ const materialSchema = new mongoose.Schema({
     unit: { type: String, default: 'unit' },
     current_stock: { type: Number, default: 0 },
     total_stock: { type: Number, default: 100 },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
 materialSchema.index({ category_id: 1 });
 materialSchema.index({ name: 1 });
+materialSchema.index({ createdBy: 1 });
 const Material = mongoose.models.Material || mongoose.model('Material', materialSchema);
 
 // Worker Model
@@ -90,10 +94,12 @@ const workerSchema = new mongoose.Schema({
     daily_wage: { type: Number, required: true },
     phone_number: String,
     location: String,
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
 workerSchema.index({ name: 1 });
 workerSchema.index({ createdAt: -1 });
+workerSchema.index({ createdBy: 1 });
 const Worker = mongoose.models.Worker || mongoose.model('Worker', workerSchema);
 
 // Project Model
@@ -110,10 +116,12 @@ const projectSchema = new mongoose.Schema({
     total_cost: { type: Number, default: 0 },
     paid_amount: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    assignedSupervisors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     site_photos: [{ type: String }], // Base64 strings for site images
     createdAt: { type: Date, default: Date.now }
 });
 projectSchema.index({ createdBy: 1 });
+projectSchema.index({ assignedSupervisors: 1 });
 projectSchema.index({ status: 1 });
 projectSchema.index({ createdAt: -1 });
 projectSchema.index({ customer_phone: 1 });
@@ -164,8 +172,10 @@ const Quotation = mongoose.models.Quotation || mongoose.model('Quotation', quota
 const stageMasterSchema = new mongoose.Schema({
     name: { type: String, required: true },
     description: String,
-    order: { type: Number, default: 0 }
+    order: { type: Number, default: 0 },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 });
+stageMasterSchema.index({ createdBy: 1 });
 const StageMaster = mongoose.models.StageMaster || mongoose.model('StageMaster', stageMasterSchema);
 
 // Project Stage (stage-wise tracking)
@@ -276,6 +286,56 @@ const notificationSchema = new mongoose.Schema({
 });
 notificationSchema.index({ user_id: 1, read: 1, createdAt: -1 });
 const Notification = mongoose.models.Notification || mongoose.model('Notification', notificationSchema);
+
+// ========== ADVANCED PROCUREMENT MODELS (Phases 5 & 6) ==========
+
+// Supplier Model (Phase 5)
+const supplierSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    phone: String,
+    material_type: String, // e.g. Cement, Steel, Sand
+    credit_limit: { type: Number, default: 0 },
+    current_balance: { type: Number, default: 0 },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+supplierSchema.index({ createdBy: 1 });
+const Supplier = mongoose.models.Supplier || mongoose.model('Supplier', supplierSchema);
+
+// Material Indent (Phase 6)
+const materialIndentSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+    quantity: { type: Number, required: true },
+    requested_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Ordered'], default: 'Pending' },
+    notes: String,
+    createdAt: { type: Date, default: Date.now }
+});
+materialIndentSchema.index({ project_id: 1 });
+materialIndentSchema.index({ requested_by: 1 });
+const MaterialIndent = mongoose.models.MaterialIndent || mongoose.model('MaterialIndent', materialIndentSchema);
+
+// Purchase Order (Phase 6)
+const purchaseOrderSchema = new mongoose.Schema({
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    supplier_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier' },
+    materials: [{
+        material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+        quantity: Number,
+        unit_price: Number,
+        total_cost: Number
+    }],
+    total_amount: Number,
+    status: { type: String, enum: ['Draft', 'Sent', 'Received', 'Partially Received', 'Cancelled'], default: 'Draft' },
+    po_number: String,
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+purchaseOrderSchema.index({ project_id: 1 });
+purchaseOrderSchema.index({ supplier_id: 1 });
+purchaseOrderSchema.index({ createdBy: 1 });
+const PurchaseOrder = mongoose.models.PurchaseOrder || mongoose.model('PurchaseOrder', purchaseOrderSchema);
 
 // Quotation Version
 const quotationVersionSchema = new mongoose.Schema({
@@ -612,7 +672,19 @@ app.get('/api/projects', authenticateToken, async (req, res, next) => {
         const statusFilter = req.query.status;
         const sortBy = req.query.sort || '-createdAt';
 
-        let query = req.user.role === 'customer' ? { customer_phone: req.user.phone } : {};
+        let query = {};
+        if (req.user.role === 'customer') {
+            query.customer_phone = req.user.phone;
+        } else if (req.user.role === 'supervisor') {
+            query.$or = [
+                { createdBy: req.user.id },
+                { assignedSupervisors: req.user.id }
+            ];
+        } else {
+            // For builder, staff, admin (if restricted)
+            query.createdBy = req.user.id;
+        }
+
         if (statusFilter && statusFilter !== 'All') {
             query.status = statusFilter;
         }
@@ -748,6 +820,35 @@ app.put('/api/projects/:id', authenticateToken, async (req, res, next) => {
     }
 });
 
+// Assign supervisor to project (Phase 4)
+app.put('/api/projects/:id/assign-supervisor', authenticateToken, async (req, res, next) => {
+    try {
+        const { supervisor_id } = req.body;
+        if (!supervisor_id) {
+            return res.status(400).json({ success: false, message: 'Supervisor ID is required' });
+        }
+
+        const project = await Project.findById(req.params.id);
+        if (!project) {
+            return res.status(404).json({ success: false, message: 'Project not found' });
+        }
+
+        // Only the creator can assign supervisors
+        if (project.createdBy.toString() !== req.user.id && req.user.role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Not authorized' });
+        }
+
+        if (!project.assignedSupervisors.includes(supervisor_id)) {
+            project.assignedSupervisors.push(supervisor_id);
+            await project.save();
+        }
+
+        res.json({ success: true, message: 'Supervisor assigned successfully', data: project });
+    } catch (err) {
+        next(err);
+    }
+});
+
 // Get project materials
 app.get('/api/projects/:id/materials', authenticateToken, async (req, res, next) => {
     try {
@@ -849,7 +950,12 @@ app.get('/api/projects/:id/costing', authenticateToken, async (req, res, next) =
 
 app.get('/api/quotations', authenticateToken, async (req, res, next) => {
     try {
-        const quotations = await Quotation.find().populate('project_id', 'project_name customer_name').sort({ createdAt: -1 });
+        // Only get quotations for projects owned by the user
+        const userProjects = await Project.find({ createdBy: req.user.id }).select('_id');
+        const projectIds = userProjects.map(p => p._id);
+
+        const query = { project_id: { $in: projectIds } };
+        const quotations = await Quotation.find(query).populate('project_id', 'project_name customer_name').sort({ createdAt: -1 });
         res.json(quotations);
     } catch (err) {
         next(err);
@@ -1196,7 +1302,7 @@ app.post('/api/seed', async (req, res, next) => {
 // Stage Master Routes
 app.get('/api/stages', authenticateToken, async (req, res, next) => {
     try {
-        const stages = await StageMaster.find().sort({ order: 1 });
+        const stages = await StageMaster.find({ createdBy: req.user.id }).sort({ order: 1 });
         res.json(stages);
     } catch (err) {
         next(err);
@@ -1205,7 +1311,7 @@ app.get('/api/stages', authenticateToken, async (req, res, next) => {
 
 app.post('/api/stages', authenticateToken, requireAdmin, async (req, res, next) => {
     try {
-        const stage = new StageMaster(req.body);
+        const stage = new StageMaster({ ...req.body, createdBy: req.user.id });
         await stage.save();
         res.status(201).json(stage);
     } catch (err) {
@@ -1470,8 +1576,9 @@ app.get('/api/workers', authenticateToken, async (req, res, next) => {
             sortQuery[sortBy] = 1;
         }
 
-        const total = await Worker.countDocuments();
-        const workers = await Worker.find().sort(sortQuery).skip(skip).limit(limit);
+        let query = { createdBy: req.user.id };
+        const total = await Worker.countDocuments(query);
+        const workers = await Worker.find(query).sort(sortQuery).skip(skip).limit(limit);
 
         // Return paginated response if page/limit specified, else direct array for backward compatibility
         if (req.query.page || req.query.limit) {
@@ -1519,7 +1626,7 @@ app.post('/api/workers', authenticateToken, async (req, res, next) => {
         if (daily_wage < 0) {
             return res.status(400).json({ success: false, message: 'Daily wage must be positive' });
         }
-        const worker = new Worker({ name, role: role || 'Worker', daily_wage, phone_number, location });
+        const worker = new Worker({ name, role: role || 'Worker', daily_wage, phone_number, location, createdBy: req.user.id });
         await worker.save();
         const workerObj = worker.toObject();
         workerObj.id = workerObj._id.toString();
@@ -1571,7 +1678,7 @@ app.get('/api/materials', authenticateToken, async (req, res, next) => {
         const sortBy = req.query.sort || '-createdAt';
         const categoryFilter = req.query.category_id;
 
-        let query = {};
+        let query = { createdBy: req.user.id };
         if (categoryFilter) {
             query.category_id = categoryFilter;
         }
@@ -1648,7 +1755,7 @@ app.post('/api/materials', authenticateToken, async (req, res, next) => {
         if (price_per_unit < 0) {
             return res.status(400).json({ success: false, message: 'Price must be positive' });
         }
-        const material = new Material({ name, category_id, price_per_unit, unit: unit || 'unit' });
+        const material = new Material({ name, category_id, price_per_unit, unit: unit || 'unit', createdBy: req.user.id });
         await material.save();
         res.status(201).json(material);
     } catch (err) {
@@ -1689,8 +1796,86 @@ app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, re
 // Get all material categories
 app.get('/api/material-categories', authenticateToken, async (req, res, next) => {
     try {
-        const categories = await MaterialCategory.find();
+        const categories = await MaterialCategory.find({ createdBy: req.user.id });
         res.json(categories);
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== SUPPLIERS API (Phase 5) ====================
+
+app.get('/api/suppliers', authenticateToken, async (req, res, next) => {
+    try {
+        const suppliers = await Supplier.find({ createdBy: req.user.id }).sort({ name: 1 });
+        res.json(suppliers);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/suppliers', authenticateToken, async (req, res, next) => {
+    try {
+        const supplier = new Supplier({ ...req.body, createdBy: req.user.id });
+        await supplier.save();
+        res.status(201).json({ success: true, data: supplier });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== PROCUREMENT API (Phase 6) ====================
+
+// Material Indents (Requests from site)
+app.get('/api/projects/:id/indents', authenticateToken, async (req, res, next) => {
+    try {
+        const indents = await MaterialIndent.find({ project_id: req.params.id })
+            .populate('material_id', 'name unit')
+            .populate('requested_by', 'name')
+            .sort({ createdAt: -1 });
+        res.json(indents);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/projects/:id/indents', authenticateToken, async (req, res, next) => {
+    try {
+        const indent = new MaterialIndent({
+            ...req.body,
+            project_id: req.params.id,
+            requested_by: req.user.id,
+            status: 'Pending'
+        });
+        await indent.save();
+        res.status(201).json({ success: true, data: indent });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Purchase Orders
+app.get('/api/projects/:id/purchase-orders', authenticateToken, async (req, res, next) => {
+    try {
+        const pos = await PurchaseOrder.find({ project_id: req.params.id })
+            .populate('supplier_id', 'name')
+            .sort({ createdAt: -1 });
+        res.json(pos);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/projects/:id/purchase-orders', authenticateToken, async (req, res, next) => {
+    try {
+        const po = new PurchaseOrder({
+            ...req.body,
+            project_id: req.params.id,
+            createdBy: req.user.id,
+            status: 'Draft'
+        });
+        await po.save();
+        res.status(201).json({ success: true, data: po });
     } catch (err) {
         next(err);
     }
@@ -1736,8 +1921,13 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
         const now = new Date();
         const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 
+        const userProjectDocs = await Project.find({ createdBy: req.user.id }).select('_id');
+        const userProjectIds = userProjectDocs.map(p => p._id);
+        const userObjectId = new mongoose.Types.ObjectId(req.user.id);
+
         // 1. Project stats & Financials (Single aggregation on Projects)
         const projectStats = await Project.aggregate([
+            { $match: { createdBy: userObjectId } },
             {
                 $group: {
                     _id: null,
@@ -1758,6 +1948,7 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
         const monthlyRevenueRaw = await Payment.aggregate([
             {
                 $match: {
+                    project_id: { $in: userProjectIds },
                     status: 'Paid',
                     payment_date: { $gte: sixMonthsAgo }
                 }
@@ -1790,12 +1981,12 @@ app.get('/api/analytics/overview', authenticateToken, async (req, res, next) => 
         }
 
         // 3. Resource Counts
-        const totalMaterials = await Material.countDocuments();
-        const totalWorkers = await Worker.countDocuments();
+        const totalMaterials = await Material.countDocuments({ createdBy: req.user.id });
+        const totalWorkers = await Worker.countDocuments({ createdBy: req.user.id });
 
         // 4. Outstanding Payments
         const outstandingData = await Payment.aggregate([
-            { $match: { status: { $in: ['Pending', 'Partial'] } } },
+            { $match: { project_id: { $in: userProjectIds }, status: { $in: ['Pending', 'Partial'] } } },
             {
                 $group: {
                     _id: null,
