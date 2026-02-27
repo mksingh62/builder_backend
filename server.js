@@ -76,6 +76,8 @@ const materialSchema = new mongoose.Schema({
     name: { type: String, required: true },
     category_id: { type: mongoose.Schema.Types.ObjectId, ref: 'MaterialCategory' },
     price_per_unit: { type: Number, required: true },
+    gst_percent: { type: Number, default: 0 },
+    hsn_code: String,
     unit: { type: String, default: 'unit' },
     current_stock: { type: Number, default: 0 },
     total_stock: { type: Number, default: 100 },
@@ -87,13 +89,41 @@ materialSchema.index({ name: 1 });
 materialSchema.index({ createdBy: 1 });
 const Material = mongoose.models.Material || mongoose.model('Material', materialSchema);
 
+// Global App Setting (GST, Rates, etc.)
+const globalSettingSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    defaultGstPercent: { type: Number, default: 18 },
+    currencySymbol: { type: String, default: '₹' },
+    laborCategories: [String], // Fallback if categories not in WorkerCategory
+    materialCategories: [String],
+    projectStages: [String], // Custom list of stages for this user
+    updatedAt: { type: Date, default: Date.now }
+});
+globalSettingSchema.index({ userId: 1 }, { unique: true });
+const GlobalSetting = mongoose.models.GlobalSetting || mongoose.model('GlobalSetting', globalSettingSchema);
+
+// Worker Category Model (Phase 11: Customization)
+const workerCategorySchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: String,
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+workerCategorySchema.index({ createdBy: 1 });
+const WorkerCategory = mongoose.models.WorkerCategory || mongoose.model('WorkerCategory', workerCategorySchema);
+
 // Worker Model
 const workerSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    role: { type: String, default: 'Worker' },
+    role: { type: String, default: 'Worker' }, // Mason, Helper, etc.
+    skill_category: { type: String, default: 'Unskilled' }, // Now allow custom strings
+    category_id: { type: mongoose.Schema.Types.ObjectId, ref: 'WorkerCategory' },
+    payment_profile: { type: String, enum: ['Daily', 'Weekly', 'Monthly', 'Piece-Rate'], default: 'Daily' },
     daily_wage: { type: Number, required: true },
+    monthly_salary: { type: Number, default: 0 },
+    piece_rate: { type: Number, default: 0 },
     phone_number: String,
     location: String,
+    current_advance: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
@@ -226,17 +256,25 @@ const StageWorker = mongoose.models.StageWorker || mongoose.model('StageWorker',
 const dailyEntrySchema = new mongoose.Schema({
     project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     date: { type: Date, default: Date.now },
-    workers_present: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Worker' }],
+    attendance: [{
+        worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker' },
+        status: { type: String, enum: ['Present', 'Absent', 'Half-Day', 'Overtime'], default: 'Present' },
+        hours: { type: Number, default: 8 },
+        wage_multiplier: { type: Number, default: 1 }
+    }],
+    attendance_photo: String, // Base64 group photo
     materials_used: [{
         material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
         material_name: String,
         quantity: Number,
-        cost: Number
+        cost: Number,
+        wastage_flag: { type: Boolean, default: false }
     }],
     extra_expenses: { type: Number, default: 0 },
     expense_description: String,
     total_daily_cost: { type: Number, default: 0 },
-    notes: String
+    notes: String,
+    logged_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 });
 dailyEntrySchema.index({ project_id: 1, date: -1 });
 const DailyEntry = mongoose.models.DailyEntry || mongoose.model('DailyEntry', dailyEntrySchema);
@@ -309,6 +347,8 @@ const materialIndentSchema = new mongoose.Schema({
     quantity: { type: Number, required: true },
     requested_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Ordered'], default: 'Pending' },
+    approval_date: Date,
+    approved_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     notes: String,
     createdAt: { type: Date, default: Date.now }
 });
@@ -322,13 +362,17 @@ const purchaseOrderSchema = new mongoose.Schema({
     supplier_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier' },
     materials: [{
         material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
-        quantity: Number,
+        quantity_ordered: Number,
+        quantity_received: { type: Number, default: 0 },
         unit_price: Number,
         total_cost: Number
     }],
     total_amount: Number,
     status: { type: String, enum: ['Draft', 'Sent', 'Received', 'Partially Received', 'Cancelled'], default: 'Draft' },
     po_number: String,
+    challan_photo: String, // Base64 proof of delivery
+    received_date: Date,
+    received_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
@@ -336,6 +380,19 @@ purchaseOrderSchema.index({ project_id: 1 });
 purchaseOrderSchema.index({ supplier_id: 1 });
 purchaseOrderSchema.index({ createdBy: 1 });
 const PurchaseOrder = mongoose.models.PurchaseOrder || mongoose.model('PurchaseOrder', purchaseOrderSchema);
+
+// Material Transfer (Phase 6)
+const materialTransferSchema = new mongoose.Schema({
+    from_project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    to_project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
+    quantity: { type: Number, required: true },
+    transfer_date: { type: Date, default: Date.now },
+    status: { type: String, enum: ['Pending', 'Completed', 'Cancelled'], default: 'Pending' },
+    requested_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    confirmed_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+const MaterialTransfer = mongoose.models.MaterialTransfer || mongoose.model('MaterialTransfer', materialTransferSchema);
 
 // Quotation Version
 const quotationVersionSchema = new mongoose.Schema({
@@ -375,6 +432,62 @@ const quotationWorkerSchema = new mongoose.Schema({
 });
 quotationWorkerSchema.index({ quotation_id: 1 });
 const QuotationWorker = mongoose.models.QuotationWorker || mongoose.model('QuotationWorker', quotationWorkerSchema);
+
+// ========== MACHINERY & EQUIPMENT MODELS (Phase 10) ==========
+
+// Machinery Model
+const machinerySchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    category: { type: String, enum: ['Heavy Machinery', 'Power Tools', 'Scaffolding', 'Other'], default: 'Other' },
+    ownership_status: { type: String, enum: ['Owned', 'Rented'], default: 'Owned' },
+    model_number: String,
+    serial_number: String,
+    purchase_date: Date,
+    fuel_type: { type: String, enum: ['Diesel', 'Petrol', 'Electric', 'None'], default: 'None' },
+    current_project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    status: { type: String, enum: ['Available', 'On Site', 'Maintenance', 'Broken'], default: 'Available' },
+    hourly_rate: { type: Number, default: 0 },
+    daily_rate: { type: Number, default: 0 },
+    last_service_date: Date,
+    next_service_due: Date,
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+machinerySchema.index({ createdBy: 1 });
+machinerySchema.index({ current_project_id: 1 });
+const Machinery = mongoose.models.Machinery || mongoose.model('Machinery', machinerySchema);
+
+// Machinery Log (Usage, Fuel, Maintenance)
+const machineryLogSchema = new mongoose.Schema({
+    machinery_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Machinery', required: true },
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    log_type: { type: String, enum: ['Usage', 'Fuel', 'Maintenance', 'Transfer'], required: true },
+    date: { type: Date, default: Date.now },
+
+    // For Usage
+    start_hours: Number,
+    end_hours: Number,
+    runtime: Number,
+
+    // For Fuel
+    fuel_liters: Number,
+    fuel_cost: Number,
+
+    // For Maintenance
+    maintenance_description: String,
+    maintenance_cost: Number,
+
+    // For Transfer
+    from_project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    to_project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+
+    notes: String,
+    logged_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+machineryLogSchema.index({ machinery_id: 1, date: -1 });
+machineryLogSchema.index({ project_id: 1 });
+const MachineryLog = mongoose.models.MachineryLog || mongoose.model('MachineryLog', machineryLogSchema);
 
 // ==================== MULTER CONFIGURATION ====================
 // Memory storage for all uploads (serverless-compatible)
@@ -1881,6 +1994,70 @@ app.post('/api/projects/:id/purchase-orders', authenticateToken, async (req, res
     }
 });
 
+// ==================== MACHINERY API (Phase 10) ====================
+
+app.get('/api/machinery', authenticateToken, async (req, res, next) => {
+    try {
+        const machinery = await Machinery.find({ createdBy: req.user.id })
+            .populate('current_project_id', 'project_name')
+            .sort({ name: 1 });
+        res.json(machinery);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/machinery', authenticateToken, async (req, res, next) => {
+    try {
+        const machinery = new Machinery({ ...req.body, createdBy: req.user.id });
+        await machinery.save();
+        res.status(201).json({ success: true, data: machinery });
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.get('/api/machinery/:id/logs', authenticateToken, async (req, res, next) => {
+    try {
+        const logs = await MachineryLog.find({ machinery_id: req.params.id })
+            .populate('project_id', 'project_name')
+            .populate('logged_by', 'name')
+            .sort({ date: -1 });
+        res.json(logs);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/machinery/:id/logs', authenticateToken, async (req, res, next) => {
+    try {
+        const log = new MachineryLog({
+            ...req.body,
+            machinery_id: req.params.id,
+            logged_by: req.user.id
+        });
+        await log.save();
+
+        // Update machinery status/project if log is usage or transfer
+        const updateData = {};
+        if (req.body.log_type === 'Transfer') {
+            updateData.current_project_id = req.body.to_project_id;
+            updateData.status = req.body.to_project_id ? 'On Site' : 'Available';
+        } else if (req.body.log_type === 'Maintenance') {
+            updateData.status = 'Maintenance';
+            updateData.last_service_date = req.body.date;
+        }
+
+        if (Object.keys(updateData).length > 0) {
+            await Machinery.findByIdAndUpdate(req.params.id, updateData);
+        }
+
+        res.status(201).json({ success: true, data: log });
+    } catch (err) {
+        next(err);
+    }
+});
+
 // Health check
 app.get('/api/health', async (req, res) => {
     try {
@@ -2278,6 +2455,106 @@ cron.schedule('0 9 * * *', async () => {
         logger.info(`Processed ${overduePayments.length} overdue payments`);
     } catch (err) {
         logger.error('Overdue payment cron error:', err);
+    }
+});
+
+// ==================== CUSTOMIZATION & SETTINGS (Phase 11) ====================
+
+// Global Settings (GST, Categories, etc.)
+app.get('/api/settings/global', authenticateToken, async (req, res, next) => {
+    try {
+        let settings = await GlobalSetting.findOne({ userId: req.user.id });
+        if (!settings) {
+            settings = new GlobalSetting({
+                userId: req.user.id,
+                laborCategories: ['Mason', 'Helper', 'Plumber', 'Electrician', 'Carpenter'],
+                materialCategories: ['Aggregates', 'Cement', 'Steel', 'Bricks', 'Sand'],
+                projectStages: ['Foundation', 'Structure', 'Plastering', 'Flooring', 'Finishing']
+            });
+            await settings.save();
+        }
+        res.json({ success: true, data: settings });
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/settings/global', authenticateToken, async (req, res, next) => {
+    try {
+        const settings = await GlobalSetting.findOneAndUpdate(
+            { userId: req.user.id },
+            { ...req.body, updatedAt: Date.now() },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, data: settings });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Worker Categories
+app.get('/api/worker-categories', authenticateToken, async (req, res, next) => {
+    try {
+        const categories = await WorkerCategory.find({
+            $or: [{ createdBy: req.user.id }, { createdBy: null }]
+        });
+        res.json(categories);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/worker-categories', authenticateToken, async (req, res, next) => {
+    try {
+        const category = new WorkerCategory({ ...req.body, createdBy: req.user.id });
+        await category.save();
+        res.status(201).json({ success: true, data: category });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Material Categories
+app.get('/api/material-categories', authenticateToken, async (req, res, next) => {
+    try {
+        const categories = await MaterialCategory.find({
+            $or: [{ createdBy: req.user.id }, { createdBy: null }]
+        });
+        res.json(categories);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/material-categories', authenticateToken, async (req, res, next) => {
+    try {
+        const category = new MaterialCategory({ ...req.body, createdBy: req.user.id });
+        await category.save();
+        res.status(201).json({ success: true, data: category });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Project Stages
+app.get('/api/project-stages', authenticateToken, async (req, res, next) => {
+    try {
+        const stages = await StageMaster.find({
+            $or: [{ createdBy: req.user.id }, { createdBy: null }]
+        }).sort({ order: 1 });
+        res.json(stages);
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/project-stages', authenticateToken, async (req, res, next) => {
+    try {
+        const stage = new StageMaster({ ...req.body, createdBy: req.user.id });
+        await stage.save();
+        res.status(201).json({ success: true, data: stage });
+    } catch (err) {
+        next(err);
     }
 });
 
