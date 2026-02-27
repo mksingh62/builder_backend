@@ -39,10 +39,47 @@ if (!isServerless && fs.existsSync && typeof __dirname !== 'undefined') {
     }
 }
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || config.mongodbUri || '')
-    .then(() => console.log('MongoDB Connected'))
-    .catch(err => console.error('MongoDB Connection Error:', err));
+// MongoDB Connection logic for both serverless and long-running environments
+const connectDB = async () => {
+    if (mongoose.connection.readyState >= 1) return mongoose.connection;
+
+    const uri = process.env.MONGODB_URI || config.mongodbUri;
+    if (!uri) {
+        logger.error('MONGODB_URI is not defined in environment variables');
+        throw new Error('Database configuration missing');
+    }
+
+    try {
+        await mongoose.connect(uri, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        });
+        logger.info('MongoDB Connected');
+        return mongoose.connection;
+    } catch (err) {
+        logger.error('MongoDB Connection Error:', err);
+        throw err;
+    }
+};
+
+// Initial connection attempt (for long-running processes)
+if (!isServerless) {
+    connectDB().catch(() => { }); // Errors handled in connectDB
+}
+
+// Middleware to ensure DB connection before handling requests (especially for serverless)
+app.use(async (req, res, next) => {
+    try {
+        await connectDB();
+        next();
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database connection failed. Please check if your IP is whitelisted in MongoDB Atlas.',
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+});
 
 // ==================== MODELS ====================
 
