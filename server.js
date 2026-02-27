@@ -222,12 +222,18 @@ const quotationSchema = new mongoose.Schema({
     quotation_number: { type: String, required: true },
     material_cost: { type: Number, default: 0 },
     labor_cost: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 },
+    margin: { type: Number, default: 0 },          // percentage
+    margin_amount: { type: Number, default: 0 },
+    contingency: { type: Number, default: 0 },     // percentage
+    contingency_amount: { type: Number, default: 0 },
+    total_cost: { type: Number, default: 0 },      // subtotal after margin+contingency, before GST
     gst_rate: { type: Number, default: 18 },
     gst_amount: { type: Number, default: 0 },
     grand_total: { type: Number, default: 0 },
     status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
-    createdAt: { type: Date, default: Date.now }
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now },
+    created_at: { type: Date, default: Date.now },
 });
 quotationSchema.index({ project_id: 1 });
 quotationSchema.index({ createdAt: -1 });
@@ -251,11 +257,12 @@ const projectStageSchema = new mongoose.Schema({
     stage_name: String,
     stage_order: Number,
     status: { type: String, enum: ['Pending', 'In Progress', 'Completed'], default: 'Pending' },
-    start_date: Date,
-    end_date: Date,
+    percent_complete: { type: Number, default: 0, min: 0, max: 100 },
+    start_date: { type: Date },
+    end_date: { type: Date },
     material_cost: { type: Number, default: 0 },
     labor_cost: { type: Number, default: 0 },
-    total_cost: { type: Number, default: 0 }
+    total_cost: { type: Number, default: 0 },
 });
 projectStageSchema.index({ project_id: 1, stage_order: 1 });
 const ProjectStage = mongoose.models.ProjectStage || mongoose.model('ProjectStage', projectStageSchema);
@@ -1134,47 +1141,65 @@ app.get('/api/quotations/:id', authenticateToken, async (req, res, next) => {
 
 app.post('/api/quotation/generate', authenticateToken, async (req, res, next) => {
     try {
-        const { project_id } = req.body;
+        const { project_id, gst_rate: bodyGst, margin: bodyMargin, contingency: bodyContingency } = req.body;
         if (!project_id) {
             return res.status(400).json({ success: false, message: 'Project ID is required' });
         }
 
-        // Get GST rate from AppSetting (default 18%)
-        const gstSetting = await AppSetting.findOne({ key: 'gst_rate' });
-        const gstRate = gstSetting ? (gstSetting.value / 100) : 0.18;
+        // Resolve GST rate: body > AppSetting > default 18%
+        let gstRateValue = 18;
+        if (bodyGst !== undefined && bodyGst !== null) {
+            gstRateValue = parseFloat(bodyGst) || 18;
+        } else {
+            const gstSetting = await AppSetting.findOne({ key: 'gst_rate' });
+            if (gstSetting) gstRateValue = parseFloat(gstSetting.value) || 18;
+        }
+        const gstRateFraction = gstRateValue / 100;
 
+        // Margin and contingency (as %)
+        const marginPct = parseFloat(bodyMargin) || 0;
+        const contingencyPct = parseFloat(bodyContingency) || 0;
+
+        // Pull real costs from project
         const materials = await ProjectMaterial.find({ project_id }).populate('material_id', 'name unit price_per_unit');
         const workers = await ProjectWorker.find({ project_id }).populate('worker_id', 'name role daily_wage');
 
         let material_cost = 0;
         let labor_cost = 0;
 
-        materials.forEach(m => {
-            material_cost += m.total_cost || 0;
-        });
+        materials.forEach(m => { material_cost += m.total_cost || 0; });
+        workers.forEach(w => { labor_cost += w.total_wage || 0; });
 
-        workers.forEach(w => {
-            labor_cost += w.total_wage || 0;
-        });
+        const base_cost = material_cost + labor_cost;
 
-        const total_cost = material_cost + labor_cost;
-        const gst_amount = total_cost * gstRate;
+        // Apply margin
+        const margin_amount = base_cost * (marginPct / 100);
+        const after_margin = base_cost + margin_amount;
+
+        // Apply contingency on top of margin
+        const contingency_amount = after_margin * (contingencyPct / 100);
+        const total_cost = after_margin + contingency_amount;
+
+        // Apply GST on total_cost
+        const gst_amount = total_cost * gstRateFraction;
         const grand_total = total_cost + gst_amount;
 
         const quotation_number = 'QTN-' + Date.now().toString().slice(-8);
-
-        // Get the GST rate value to store with quotation
-        const gstRateValue = gstSetting ? gstSetting.value : 18;
 
         const newQuotation = new Quotation({
             project_id,
             quotation_number,
             material_cost,
             labor_cost,
+            margin: marginPct,
+            margin_amount,
+            contingency: contingencyPct,
+            contingency_amount,
             total_cost,
             gst_rate: gstRateValue,
             gst_amount,
-            grand_total
+            grand_total,
+            createdBy: req.user.id,
         });
         await newQuotation.save();
 
@@ -1183,10 +1208,10 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res, next) =>
         for (const m of materials) {
             const qm = new QuotationMaterial({
                 quotation_id,
-                material_id: m.material_id._id,
+                material_id: m.material_id?._id || m.material_id,
                 quantity: m.quantity,
                 unit_price: m.unit_price,
-                total_cost: m.total_cost
+                total_cost: m.total_cost,
             });
             await qm.save();
         }
@@ -1194,27 +1219,31 @@ app.post('/api/quotation/generate', authenticateToken, async (req, res, next) =>
         for (const w of workers) {
             const qw = new QuotationWorker({
                 quotation_id,
-                worker_id: w.worker_id._id,
+                worker_id: w.worker_id?._id || w.worker_id,
                 days: w.days,
                 daily_wage: w.daily_wage,
-                total_cost: w.total_wage
+                total_cost: w.total_wage,
             });
             await qw.save();
         }
 
         res.json({
+            success: true,
             id: quotation_id,
             quotation_number,
             material_cost,
             labor_cost,
+            margin: marginPct,
+            margin_amount,
+            contingency: contingencyPct,
+            contingency_amount,
             total_cost,
+            gst_rate: gstRateValue,
             gst_amount,
             grand_total,
-            message: 'Quotation generated successfully'
+            message: 'Quotation generated successfully',
         });
-    } catch (err) {
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
 // Delete project
