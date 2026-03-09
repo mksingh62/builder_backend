@@ -1557,7 +1557,7 @@ app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (re
 app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
         const dailyEntries = await DailyEntry.find({ project_id: req.params.id })
-            .populate('workers_present', 'name role')
+            .populate('attendance.worker_id', 'name role daily_wage')
             .sort({ date: -1 });
         res.json(dailyEntries);
     } catch (err) {
@@ -1567,19 +1567,21 @@ app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res, n
 
 app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
-        const { workers_present, materials_used, extra_expenses, expense_description, notes, date } = req.body;
+        const { attendance, materials_used, extra_expenses, expense_description, notes, date, attendance_photo } = req.body;
 
         const dailyEntry = new DailyEntry({
             project_id: req.params.id,
             date: date ? new Date(date) : new Date(),
-            workers_present: workers_present || [],
+            attendance: attendance || [],
+            attendance_photo: attendance_photo,
             materials_used: materials_used || [],
             extra_expenses: extra_expenses || 0,
             expense_description,
-            notes
+            notes,
+            logged_by: req.user.id
         });
 
-        // Calculate total daily cost: materials + extra expenses + worker wages
+        // Calculate total daily cost
         let totalCost = dailyEntry.extra_expenses || 0;
 
         // Add material costs
@@ -1587,18 +1589,72 @@ app.post('/api/projects/:id/daily-entries', authenticateToken, async (req, res, 
             totalCost += material.cost || 0;
         }
 
-        // Add worker wages (daily_wage × number of workers present)
-        if (dailyEntry.workers_present && dailyEntry.workers_present.length > 0) {
-            const workers = await Worker.find({ _id: { $in: dailyEntry.workers_present } });
-            for (const worker of workers) {
-                totalCost += worker.daily_wage || 0;
+        // Add worker wages based on attendance status
+        if (dailyEntry.attendance && dailyEntry.attendance.length > 0) {
+            const workerIds = dailyEntry.attendance.map(a => a.worker_id);
+            const workers = await Worker.find({ _id: { $in: workerIds } });
+
+            for (const att of dailyEntry.attendance) {
+                const worker = workers.find(w => w._id.toString() === att.worker_id.toString());
+                if (worker) {
+                    let multiplier = (att.status === 'Half-Day' ? 0.5 : (att.status === 'Present' ? 1.0 : (att.status === 'Overtime' ? 1.5 : 0)));
+                    totalCost += (worker.daily_wage || 0) * multiplier;
+                }
             }
         }
 
         dailyEntry.total_daily_cost = totalCost;
         await dailyEntry.save();
 
-        res.status(201).json(dailyEntry);
+        // Update Material Stock
+        if (materials_used && materials_used.length > 0) {
+            for (const mat of materials_used) {
+                if (mat.material_id) {
+                    await Material.findByIdAndUpdate(mat.material_id, {
+                        $inc: { current_stock: -mat.quantity }
+                    });
+                }
+            }
+        }
+
+        res.status(201).json({ success: true, data: dailyEntry });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Receive Purchase Order & Update Stock
+app.post('/api/purchase-orders/:id/receive', authenticateToken, async (req, res, next) => {
+    try {
+        const { receivedItems, challan_photo, notes } = req.body;
+        const po = await PurchaseOrder.findById(req.params.id);
+        if (!po) return res.status(404).json({ success: false, message: 'PO not found' });
+
+        for (const item of receivedItems) {
+            const poItem = po.materials.find(m => m.material_id.toString() === item.material_id.toString());
+            if (poItem) {
+                const qtyToAdd = parseFloat(item.received_quantity) || 0;
+                poItem.quantity_received = (poItem.quantity_received || 0) + qtyToAdd;
+
+                // Update global material stock
+                await Material.findByIdAndUpdate(item.material_id, {
+                    $inc: { current_stock: qtyToAdd }
+                });
+            }
+        }
+
+        // Update PO status
+        const allReceived = po.materials.every(m => (m.quantity_received || 0) >= (m.quantity_ordered || 0));
+        const someReceived = po.materials.some(m => (m.quantity_received || 0) > 0);
+
+        po.status = allReceived ? 'Received' : (someReceived ? 'Partially Received' : 'Draft');
+        if (challan_photo) po.challan_photo = challan_photo;
+        po.received_date = new Date();
+        po.received_by = req.user.id;
+        if (notes) po.notes = (po.notes ? po.notes + '\n' : '') + notes;
+
+        await po.save();
+        res.json({ success: true, data: po });
     } catch (err) {
         next(err);
     }
@@ -2004,6 +2060,32 @@ app.post('/api/suppliers', authenticateToken, async (req, res, next) => {
 });
 
 // ==================== PROCUREMENT API (Phase 6) ====================
+// Global Indents
+app.get('/api/indents', authenticateToken, async (req, res, next) => {
+    try {
+        const indents = await MaterialIndent.find({})
+            .populate('project_id', 'project_name')
+            .populate('material_id', 'name unit')
+            .populate('requested_by', 'name')
+            .sort({ createdAt: -1 });
+        res.json(indents);
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Global Purchase Orders
+app.get('/api/purchase-orders', authenticateToken, async (req, res, next) => {
+    try {
+        const pos = await PurchaseOrder.find({})
+            .populate('project_id', 'project_name')
+            .populate('supplier_id', 'name')
+            .sort({ createdAt: -1 });
+        res.json(pos);
+    } catch (err) {
+        next(err);
+    }
+});
 
 // Material Indents (Requests from site)
 app.get('/api/projects/:id/indents', authenticateToken, async (req, res, next) => {
@@ -2055,6 +2137,58 @@ app.post('/api/projects/:id/purchase-orders', authenticateToken, async (req, res
         });
         await po.save();
         res.status(201).json({ success: true, data: po });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Inventory Summary
+app.get('/api/inventory', authenticateToken, async (req, res, next) => {
+    try {
+        const materials = await Material.find({ createdBy: req.user.id })
+            .populate('category_id', 'name');
+
+        // We could calculate project-wise but let's return global for now
+        res.json({ success: true, data: materials });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Standalone Consumption
+app.post('/api/materials/consume', authenticateToken, async (req, res, next) => {
+    try {
+        const { material_id, project_id, quantity, notes } = req.body;
+
+        await Material.findByIdAndUpdate(material_id, {
+            $inc: { current_stock: -quantity }
+        });
+
+        // Add to daily entry or a new movement model if available
+        // For now just update global stock
+
+        res.json({ success: true, message: 'Material consumed successfully' });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Material Transfer
+app.post('/api/materials/transfer', authenticateToken, async (req, res, next) => {
+    try {
+        const { from_project_id, to_project_id, material_id, quantity } = req.body;
+
+        const transfer = new MaterialTransfer({
+            from_project_id,
+            to_project_id,
+            material_id,
+            quantity,
+            requested_by: req.user.id,
+            status: 'Completed'
+        });
+
+        await transfer.save();
+        res.json({ success: true, data: transfer });
     } catch (err) {
         next(err);
     }
