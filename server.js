@@ -303,11 +303,12 @@ const dailyEntrySchema = new mongoose.Schema({
     date: { type: Date, default: Date.now },
     attendance: [{
         worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker' },
-        status: { type: String, enum: ['Present', 'Absent', 'Half-Day', 'Overtime'], default: 'Present' },
+        status: { type: String, enum: ['Present', 'Absent', 'Half-Day', 'Overtime'], default: 'Absent' },
         hours: { type: Number, default: 8 },
-        wage_multiplier: { type: Number, default: 1 }
+        wage_multiplier: { type: Number, default: 1 },
+        notes: { type: String, default: '' }
     }],
-    attendance_photo: String, // Base64 group photo
+    attendance_photo: String,
     materials_used: [{
         material_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Material' },
         material_name: String,
