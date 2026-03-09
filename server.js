@@ -93,6 +93,7 @@ const userSchema = new mongoose.Schema({
     region: String,
     gstNumber: String,
     profilePhoto: String,
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
 });
 // Only add createdAt index, phone already has unique index
@@ -1001,6 +1002,81 @@ app.put('/api/projects/:id/assign-supervisor', authenticateToken, async (req, re
         }
 
         res.json({ success: true, message: 'Supervisor assigned successfully', data: project });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// ==================== TEAM MANAGEMENT API (Phase 4) ====================
+
+// Get builder's team (supervisors)
+app.get('/api/team', authenticateToken, async (req, res, next) => {
+    try {
+        // Find users where role is supervisor and invitedBy is the current user
+        // Also include supervisors already assigned to projects created by this user
+        const team = await User.find({
+            $or: [
+                { invitedBy: req.user.id },
+                { role: 'supervisor', invitedBy: req.user.id }
+            ]
+        }).sort({ name: 1 });
+
+        const normalizedTeam = team.map(u => {
+            const obj = u.toObject();
+            obj.id = obj._id.toString();
+            delete obj._id;
+            delete obj.password; // Security
+            return obj;
+        });
+
+        res.json({ success: true, data: normalizedTeam });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Invite supervisor (Create placeholder user)
+app.post('/api/team/invite', authenticateToken, async (req, res, next) => {
+    try {
+        const { name, phone, project_id } = req.body;
+        if (!name || !phone) {
+            return res.status(400).json({ success: false, message: 'Name and phone are required' });
+        }
+
+        // Check if user already exists
+        let user = await User.findOne({ phone });
+
+        if (user) {
+            // If user exists and is not a supervisor, maybe we shouldn't change their role?
+            // For now, let's just link them if they are invited
+            user.invitedBy = req.user.id;
+            await user.save();
+        } else {
+            // Create new supervisor user
+            user = new User({
+                name,
+                phone,
+                role: 'supervisor',
+                invitedBy: req.user.id,
+                // No password for now, they sign in via OTP
+            });
+            await user.save();
+        }
+
+        // If project_id provided, assign them immediately
+        if (project_id && project_id !== 'All Projects') {
+            const project = await Project.findById(project_id);
+            if (project && !project.assignedSupervisors.includes(user._id)) {
+                project.assignedSupervisors.push(user._id);
+                await project.save();
+            }
+        }
+
+        const userObj = user.toObject();
+        userObj.id = userObj._id.toString();
+        delete userObj._id;
+
+        res.status(201).json({ success: true, message: 'Supervisor invited successfully', data: userObj });
     } catch (err) {
         next(err);
     }
