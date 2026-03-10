@@ -1339,8 +1339,11 @@ app.delete('/api/projects/:id', authenticateToken, requireAdmin, async (req, res
 // Delete project material
 app.delete('/api/projects/:projectId/materials/:materialId', authenticateToken, async (req, res, next) => {
     try {
-        await ProjectMaterial.findByIdAndDelete(req.params.materialId);
-        res.status(204).send();
+        await ProjectMaterial.findOneAndDelete({
+            project_id: req.params.projectId,
+            material_id: req.params.materialId
+        });
+        res.status(200).json({ success: true, message: 'Material assignment removed' });
     } catch (err) {
         next(err);
     }
@@ -1349,8 +1352,11 @@ app.delete('/api/projects/:projectId/materials/:materialId', authenticateToken, 
 // Delete project worker
 app.delete('/api/projects/:projectId/workers/:workerId', authenticateToken, async (req, res, next) => {
     try {
-        await ProjectWorker.findByIdAndDelete(req.params.workerId);
-        res.status(204).send();
+        await ProjectWorker.findOneAndDelete({
+            project_id: req.params.projectId,
+            worker_id: req.params.workerId
+        });
+        res.status(200).json({ success: true, message: 'Worker assignment removed' });
     } catch (err) {
         next(err);
     }
@@ -1913,7 +1919,23 @@ app.get('/api/workers', authenticateToken, async (req, res, next) => {
 
         let query = { createdBy: req.user.id };
         const total = await Worker.countDocuments(query);
-        const workers = await Worker.find(query).sort(sortQuery).skip(skip).limit(limit);
+        const workersDocs = await Worker.find(query).sort(sortQuery).skip(skip).limit(limit);
+
+        // Fetch project names for each worker
+        const workerIds = workersDocs.map(w => w._id);
+        const assignments = await ProjectWorker.find({ worker_id: { $in: workerIds } })
+            .populate('project_id', 'project_name');
+
+        const workers = workersDocs.map(w => {
+            const obj = w.toObject();
+            obj.id = obj._id.toString();
+            // Get unique project names the worker is assigned to
+            const projectNames = assignments
+                .filter(a => a.worker_id.toString() === w._id.toString() && a.project_id)
+                .map(a => a.project_id.project_name);
+            obj.allotted_projects = [...new Set(projectNames)];
+            return obj;
+        });
 
         // Return paginated response if page/limit specified, else direct array for backward compatibility
         if (req.query.page || req.query.limit) {
