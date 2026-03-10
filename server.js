@@ -1363,13 +1363,17 @@ app.delete('/api/projects/:projectId/workers/:workerId', authenticateToken, asyn
 });
 
 // Delete quotation
-app.delete('/api/quotations/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+app.delete('/api/quotations/:id', authenticateToken, async (req, res, next) => {
     try {
+        const quotation = await Quotation.findById(req.params.id);
+        if (!quotation) {
+            return res.status(404).json({ success: false, message: 'Quotation not found' });
+        }
         await Quotation.findByIdAndDelete(req.params.id);
         // Also delete related quotation materials and workers
         await QuotationMaterial.deleteMany({ quotation_id: req.params.id });
         await QuotationWorker.deleteMany({ quotation_id: req.params.id });
-        res.status(204).send();
+        res.status(200).json({ success: true, message: 'Quotation deleted successfully' });
     } catch (err) {
         next(err);
     }
