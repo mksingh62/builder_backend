@@ -2905,6 +2905,7 @@ app.get('/api/wage-payments', authenticateToken, async (req, res, next) => {
     try {
         const query = { createdBy: req.user.id };
         if (req.query.worker_id) query.worker_id = req.query.worker_id;
+        if (req.query.project_id) query.project_id = req.query.project_id;
         const payments = await WagePayment.find(query).sort({ payment_date: -1 }).limit(200);
         res.json(payments);
     } catch (err) { next(err); }
