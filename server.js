@@ -1631,6 +1631,29 @@ app.put('/api/projects/:projectId/stages/:stageId', authenticateToken, async (re
 });
 
 // Daily Entry Routes
+app.get('/api/daily-entries', authenticateToken, async (req, res, next) => {
+    try {
+        const query = {};
+        if (req.query.worker_id) {
+            query['attendance.worker_id'] = req.query.worker_id;
+        }
+        if (req.query.date) {
+            const date = new Date(req.query.date);
+            const start = new Date(date.setHours(0, 0, 0, 0));
+            const end = new Date(date.setHours(23, 59, 59, 999));
+            query.date = { $gte: start, $lte: end };
+        }
+
+        const dailyEntries = await DailyEntry.find(query)
+            .populate('project_id', 'project_name')
+            .populate('attendance.worker_id', 'name role daily_wage')
+            .sort({ date: -1 });
+        res.json(dailyEntries);
+    } catch (err) {
+        next(err);
+    }
+});
+
 app.get('/api/projects/:id/daily-entries', authenticateToken, async (req, res, next) => {
     try {
         const dailyEntries = await DailyEntry.find({ project_id: req.params.id })
