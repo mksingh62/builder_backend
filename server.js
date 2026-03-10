@@ -2835,8 +2835,147 @@ app.post('/api/project-stages', authenticateToken, async (req, res, next) => {
     }
 });
 
+
+// ==================== WAGE PAYMENT ROUTES ====================
+
+// Wage Payment Schema (inline)
+const wagePaymentSchema = new mongoose.Schema({
+    worker_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Worker', required: true },
+    worker_name: String,
+    project_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    amount: { type: Number, required: true },
+    payment_type: { type: String, enum: ['Daily', 'Weekly', 'Monthly', 'Piece-Rate', 'Advance', 'Bonus', 'Deduction'], default: 'Daily' },
+    payment_mode: { type: String, enum: ['Cash', 'Bank Transfer', 'UPI', 'Cheque'], default: 'Cash' },
+    notes: String,
+    payment_date: { type: Date, default: Date.now },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+wagePaymentSchema.index({ worker_id: 1, payment_date: -1 });
+wagePaymentSchema.index({ createdBy: 1 });
+const WagePayment = mongoose.models.WagePayment || mongoose.model('WagePayment', wagePaymentSchema);
+
+// GET all wage payments for builder
+app.get('/api/wage-payments', authenticateToken, async (req, res, next) => {
+    try {
+        const query = { createdBy: req.user.id };
+        if (req.query.worker_id) query.worker_id = req.query.worker_id;
+        const payments = await WagePayment.find(query).sort({ payment_date: -1 }).limit(200);
+        res.json(payments);
+    } catch (err) { next(err); }
+});
+
+// POST add a wage payment/advance
+app.post('/api/wage-payments', authenticateToken, async (req, res, next) => {
+    try {
+        const { worker_id, amount, payment_type, payment_mode, notes, project_id } = req.body;
+        if (!worker_id || !amount) {
+            return res.status(400).json({ success: false, message: 'worker_id and amount are required' });
+        }
+
+        // Get worker name
+        const worker = await Worker.findById(worker_id);
+        const workerName = worker ? worker.name : 'Unknown';
+
+        // If it's an advance, update worker's current_advance field
+        if (payment_type === 'Advance' && worker) {
+            worker.current_advance = (worker.current_advance || 0) + parseFloat(amount);
+            await worker.save();
+        }
+
+        const payment = new WagePayment({
+            worker_id,
+            worker_name: workerName,
+            project_id: project_id || null,
+            amount,
+            payment_type: payment_type || 'Daily',
+            payment_mode: payment_mode || 'Cash',
+            notes,
+            createdBy: req.user.id
+        });
+        await payment.save();
+
+        res.status(201).json({ success: true, data: payment });
+    } catch (err) { next(err); }
+});
+
+// ==================== ATTENDANCE SUMMARY (Labor Master Sheet) ====================
+
+app.get('/api/attendance/summary', authenticateToken, async (req, res, next) => {
+    try {
+        const projectIdFilter = req.query.project_id;
+
+        // Get all projects for this user
+        let projectIds = [];
+        if (projectIdFilter) {
+            projectIds = [projectIdFilter];
+        } else {
+            const projects = await Project.find({ createdBy: req.user.id }).select('_id');
+            projectIds = projects.map(p => p._id);
+        }
+
+        // Get all daily entries across projects
+        const entries = await DailyEntry.find({ project_id: { $in: projectIds } }).populate('attendance.worker_id', 'name role daily_wage');
+
+        // Build per-worker summary
+        const workerMap = {};
+
+        for (const entry of entries) {
+            for (const att of entry.attendance) {
+                const worker = att.worker_id;
+                if (!worker) continue;
+                const wId = worker._id.toString();
+                if (!workerMap[wId]) {
+                    workerMap[wId] = {
+                        worker_id: wId,
+                        name: worker.name,
+                        role: worker.role,
+                        daily_wage: worker.daily_wage || 0,
+                        present_days: 0,
+                        half_days: 0,
+                        absent_days: 0,
+                        total_earned: 0
+                    };
+                }
+                if (att.status === 'Present') {
+                    workerMap[wId].present_days++;
+                    workerMap[wId].total_earned += worker.daily_wage || 0;
+                } else if (att.status === 'Half-Day') {
+                    workerMap[wId].half_days++;
+                    workerMap[wId].total_earned += (worker.daily_wage || 0) / 2;
+                } else if (att.status === 'Absent') {
+                    workerMap[wId].absent_days++;
+                }
+            }
+        }
+
+        // Get wage payments to calculate balance
+        const payments = await WagePayment.find({ createdBy: req.user.id });
+        const paymentMap = {};
+        for (const p of payments) {
+            const wId = p.worker_id.toString();
+            if (!paymentMap[wId]) paymentMap[wId] = 0;
+            if (p.payment_type !== 'Deduction') {
+                paymentMap[wId] += p.amount;
+            } else {
+                paymentMap[wId] -= p.amount;
+            }
+        }
+
+        // Add total paid to worker summary
+        const summary = Object.values(workerMap).map(w => ({
+            ...w,
+            total_paid: paymentMap[w.worker_id] || 0,
+            balance_due: w.total_earned - (paymentMap[w.worker_id] || 0)
+        }));
+
+        res.json(summary);
+    } catch (err) { next(err); }
+});
+
 // Central error handler (must be last)
 app.use(errorHandler);
+
 
 app.listen(config.port, () => {
     logger.info(`Server running on port ${config.port}`, { env: config.nodeEnv });
