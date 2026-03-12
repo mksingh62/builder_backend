@@ -704,8 +704,12 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'OTP is required' });
         }
 
-        // Determine the identifier (phone or email)
-        const identifier = email || phone;
+        // Determine the identifier for OTP cache (use whichever was provided)
+        const identifier = email && email.trim() !== '' ? email.trim() : (phone && phone.trim() !== '' ? phone.trim() : null);
+        
+        if (!identifier) {
+            return res.status(400).json({ success: false, message: 'Either email or phone is required' });
+        }
 
         const cached = otpCache.get(identifier);
 
@@ -717,39 +721,49 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         // Clear OTP after successful use
         otpCache.delete(identifier);
 
-        // Find existing user - check if EITHER phone OR email matches
+        // Find existing user - check BOTH phone AND email independently
         let user = null;
         let isNew = false;
 
-        // Try to find user by email first (if provided)
-        if (email) {
-            user = await User.findOne({ email });
+        console.log(`[USER LOOKUP] Searching for user with email: ${email}, phone: ${phone}`);
+
+        // Search by email if provided
+        if (email && email.trim() !== '') {
+            user = await User.findOne({ email: email.trim() });
+            if (user) {
+                console.log(`[USER LOOKUP] Found user by email: ${user._id}, name: ${user.name}`);
+            }
         }
         
-        // If not found by email, try phone (if provided)
-        if (!user && phone) {
-            user = await User.findOne({ phone });
+        // If not found by email, search by phone if provided
+        if (!user && phone && phone.trim() !== '') {
+            user = await User.findOne({ phone: phone.trim() });
+            if (user) {
+                console.log(`[USER LOOKUP] Found user by phone: ${user._id}, name: ${user.name}`);
+            }
         }
 
         if (!user) {
+            console.log(`[USER LOOKUP] No user found, creating new account`);
             // No existing user found - create new user
             user = new User({ 
-                phone: phone || undefined, 
-                email: email || undefined,
+                phone: phone && phone.trim() !== '' ? phone.trim() : undefined, 
+                email: email && email.trim() !== '' ? email.trim() : undefined,
                 role: role || 'builder' 
             });
             await user.save();
             isNew = true;
         } else {
+            console.log(`[USER LOOKUP] Existing user found, isNew=${isNew}`);
             // User found! Update with any new info provided
             // If user was found by phone but now has email, add it
-            if (!user.email && email) {
-                user.email = email;
+            if (!user.email && email && email.trim() !== '') {
+                user.email = email.trim();
                 await user.save();
             }
             // If user was found by email but now has phone, add it
-            if (!user.phone && phone) {
-                user.phone = phone;
+            if (!user.phone && phone && phone.trim() !== '') {
+                user.phone = phone.trim();
                 await user.save();
             }
             
