@@ -670,26 +670,18 @@ app.post('/api/auth/send-otp', async (req, res, next) => {
                 res.json({ success: true, message: 'OTP sent successfully to your email' });
             } catch (emailError) {
                 console.error('Email sending failed:', emailError);
-                // Fallback: return OTP in response for development
-                if (process.env.NODE_ENV === 'development') {
-                    res.json({ 
-                        success: true, 
-                        message: 'Email failed (dev mode: showing OTP)', 
-                        otp: otp 
-                    });
-                } else {
-                    res.status(500).json({ 
-                        success: false, 
-                        message: 'Failed to send email. Please try again or use phone verification.' 
-                    });
-                }
+                // Don't expose OTP even on failure - security first
+                res.status(500).json({ 
+                    success: false, 
+                    message: 'Failed to send email. Please check your email address and try again.' 
+                });
             }
         } else {
             // For phone, just return success (in production, you'd integrate SMS service)
             res.json({ 
                 success: true, 
-                message: 'OTP sent successfully (Simulated for phone)', 
-                otp: (process.env.NODE_ENV !== 'production' ? otp : undefined) 
+                message: 'OTP sent successfully to your phone' 
+                // Note: Never expose OTP in response for security
             });
         }
     } catch (err) {
@@ -717,8 +709,8 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
 
         const cached = otpCache.get(identifier);
 
-        // Simulation: Allow '123456' as a universal test OTP
-        if (otp !== '123456' && (!cached || cached.otp !== otp || Date.now() > cached.expires)) {
+        // Verify OTP from cache (must match exactly and not be expired)
+        if (!cached || cached.otp !== otp || Date.now() > cached.expires) {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
         }
 
