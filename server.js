@@ -766,18 +766,40 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
             isNew = true;
         } else {
             console.log(`[USER LOOKUP] ✓ Existing user found!`);
-            // User found! Update with any new info provided
-            // If user was found by phone but now has email, add it
-            if (!user.email && email && email.trim() !== '') {
-                user.email = email.trim();
-                await user.save();
-                console.log(`[USER LOOKUP] + Added email to user account`);
-            }
-            // If user was found by email but now has phone, add it
-            if (!user.phone && phone && phone.trim() !== '') {
-                user.phone = phone.trim();
-                await user.save();
-                console.log(`[USER LOOKUP] + Added phone to user account`);
+            console.log(`[USER LOOKUP] User data - name: "${user.name || 'N/A'}", email: "${user.email || 'N/A'}", phone: "${user.phone || 'N/A'}"`);
+            
+            // User found! Update with any new info provided (only if field is currently empty or different)
+            try {
+                // If user was found by phone but now provides email, add/update it
+                if (email && email.trim() !== '' && user.email !== email.trim()) {
+                    const oldEmail = user.email;
+                    user.email = email.trim();
+                    await user.save();
+                    if (!oldEmail) {
+                        console.log(`[USER LOOKUP] + Added email to user account: ${user.email}`);
+                    } else {
+                        console.log(`[USER LOOKUP] ~ Updated email: ${oldEmail} → ${user.email}`);
+                    }
+                }
+                // If user was found by email but now provides phone, add/update it
+                if (phone && phone.trim() !== '' && user.phone !== phone.trim()) {
+                    const oldPhone = user.phone;
+                    user.phone = phone.trim();
+                    await user.save();
+                    if (!oldPhone) {
+                        console.log(`[USER LOOKUP] + Added phone to user account: ${user.phone}`);
+                    } else {
+                        console.log(`[USER LOOKUP] ~ Updated phone: ${oldPhone} → ${user.phone}`);
+                    }
+                }
+            } catch (updateError) {
+                // Ignore duplicate key errors - means data already exists
+                if (updateError.code === 11000) {
+                    console.log(`[USER LOOKUP] ⚠ Field already exists, skipping update`);
+                } else {
+                    console.error(`[USER LOOKUP] Error updating user:`, updateError);
+                    throw updateError; // Re-throw if it's a different error
+                }
             }
             
             // Check if user needs to complete profile
