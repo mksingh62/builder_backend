@@ -721,30 +721,30 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         // Clear OTP after successful use
         otpCache.delete(identifier);
 
-        // Find existing user - check BOTH phone AND email independently
+        // Find existing user - check PHONE first, then email
         let user = null;
         let isNew = false;
 
-        console.log(`[USER LOOKUP] Searching for user with email: ${email}, phone: ${phone}`);
+        console.log(`[USER LOOKUP] Searching for user with email: "${email}", phone: "${phone}"`);
 
-        // Search by email if provided
-        if (email && email.trim() !== '') {
-            user = await User.findOne({ email: email.trim() });
+        // Step 1: Search by PHONE first (higher priority)
+        if (phone && phone.trim() !== '') {
+            user = await User.findOne({ phone: phone.trim() });
             if (user) {
-                console.log(`[USER LOOKUP] Found user by email: ${user._id}, name: ${user.name}`);
+                console.log(`[USER LOOKUP] ✓ Found user by PHONE: ${user._id}, name: ${user.name || 'N/A'}`);
             }
         }
         
-        // If not found by email, search by phone if provided
-        if (!user && phone && phone.trim() !== '') {
-            user = await User.findOne({ phone: phone.trim() });
+        // Step 2: If not found by phone, search by EMAIL
+        if (!user && email && email.trim() !== '') {
+            user = await User.findOne({ email: email.trim() });
             if (user) {
-                console.log(`[USER LOOKUP] Found user by phone: ${user._id}, name: ${user.name}`);
+                console.log(`[USER LOOKUP] ✓ Found user by EMAIL: ${user._id}, name: ${user.name || 'N/A'}`);
             }
         }
 
         if (!user) {
-            console.log(`[USER LOOKUP] No user found, creating new account`);
+            console.log(`[USER LOOKUP] ✗ No user found, creating new account`);
             // No existing user found - create new user
             user = new User({ 
                 phone: phone && phone.trim() !== '' ? phone.trim() : undefined, 
@@ -754,22 +754,27 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
             await user.save();
             isNew = true;
         } else {
-            console.log(`[USER LOOKUP] Existing user found, isNew=${isNew}`);
+            console.log(`[USER LOOKUP] ✓ Existing user found!`);
             // User found! Update with any new info provided
             // If user was found by phone but now has email, add it
             if (!user.email && email && email.trim() !== '') {
                 user.email = email.trim();
                 await user.save();
+                console.log(`[USER LOOKUP] + Added email to user account`);
             }
             // If user was found by email but now has phone, add it
             if (!user.phone && phone && phone.trim() !== '') {
                 user.phone = phone.trim();
                 await user.save();
+                console.log(`[USER LOOKUP] + Added phone to user account`);
             }
             
             // Check if user needs to complete profile
             if (!user.name || user.name.trim() === '') {
                 isNew = true;
+                console.log(`[USER LOOKUP] → User needs to complete profile (no name)`);
+            } else {
+                console.log(`[USER LOOKUP] → User profile is complete, redirecting to dashboard`);
             }
         }
 
