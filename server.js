@@ -734,18 +734,24 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
 
         // Step 1: Search by PHONE first (higher priority)
         if (phone && phone.trim() !== '') {
+            console.log(`[USER LOOKUP] Step 1: Searching by PHONE "${phone}"`);
             user = await User.findOne({ phone: phone.trim() });
             if (user) {
                 console.log(`[USER LOOKUP] ✓ Found user by PHONE: ${user._id}, name: ${user.name || 'N/A'}`);
             }
+        } else {
+            console.log(`[USER LOOKUP] Step 1: Skipped - No phone provided`);
         }
         
         // Step 2: If not found by phone, search by EMAIL
         if (!user && email && email.trim() !== '') {
+            console.log(`[USER LOOKUP] Step 2: Searching by EMAIL "${email}"`);
             user = await User.findOne({ email: email.trim() });
             if (user) {
                 console.log(`[USER LOOKUP] ✓ Found user by EMAIL: ${user._id}, name: ${user.name || 'N/A'}`);
             }
+        } else if (!user) {
+            console.log(`[USER LOOKUP] Step 2: Skipped - No email provided or user already found`);
         }
 
         if (!user) {
