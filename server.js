@@ -717,18 +717,22 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         // Clear OTP after successful use
         otpCache.delete(identifier);
 
-        // Find or create user
-        let user;
+        // Find existing user - check if EITHER phone OR email matches
+        let user = null;
         let isNew = false;
 
+        // Try to find user by email first (if provided)
         if (email) {
             user = await User.findOne({ email });
-        } else {
+        }
+        
+        // If not found by email, try phone (if provided)
+        if (!user && phone) {
             user = await User.findOne({ phone });
         }
 
         if (!user) {
-            // Create new user
+            // No existing user found - create new user
             user = new User({ 
                 phone: phone || undefined, 
                 email: email || undefined,
@@ -736,9 +740,23 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
             });
             await user.save();
             isNew = true;
-        } else if (!user.name || user.name.trim() === '') {
-            // User exists but hasn't completed profile setup (no name)
-            isNew = true;
+        } else {
+            // User found! Update with any new info provided
+            // If user was found by phone but now has email, add it
+            if (!user.email && email) {
+                user.email = email;
+                await user.save();
+            }
+            // If user was found by email but now has phone, add it
+            if (!user.phone && phone) {
+                user.phone = phone;
+                await user.save();
+            }
+            
+            // Check if user needs to complete profile
+            if (!user.name || user.name.trim() === '') {
+                isNew = true;
+            }
         }
 
         const token = jwt.sign(
