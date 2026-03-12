@@ -693,7 +693,11 @@ app.post('/api/auth/send-otp', async (req, res, next) => {
 // Verify OTP (Phone or Email)
 app.post('/api/auth/verify-otp', async (req, res, next) => {
     try {
-        const { phone, email, otp, role } = req.body;
+        let { phone, email, otp, role } = req.body;
+        
+        // Handle null/undefined values properly
+        if (phone === 'null' || phone === null || phone === undefined) phone = '';
+        if (email === 'null' || email === null || email === undefined) email = '';
         
         // Validate that either phone or email is provided
         if (!phone && !email) {
@@ -726,6 +730,7 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         let isNew = false;
 
         console.log(`[USER LOOKUP] Searching for user with email: "${email}", phone: "${phone}"`);
+        console.log(`[USER LOOKUP] After cleanup - email: "${email}", phone: "${phone}"`);
 
         // Step 1: Search by PHONE first (higher priority)
         if (phone && phone.trim() !== '') {
