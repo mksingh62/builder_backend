@@ -1275,8 +1275,13 @@ app.post('/api/team/invite', authenticateToken, async (req, res, next) => {
 // Get project materials
 app.get('/api/projects/:id/materials', authenticateToken, async (req, res, next) => {
     try {
-        const materials = await ProjectMaterial.find({ project_id: req.params.id }).populate('material_id', 'name unit price_per_unit');
-        res.json(materials);
+        const materials = await ProjectMaterial.find({ project_id: req.params.id })
+            .populate('material_id', 'name unit price_per_unit');
+
+        // Filter out entries whose base material has been deleted
+        const visibleMaterials = materials.filter(m => !!m.material_id);
+
+        res.json(visibleMaterials);
     } catch (err) {
         next(err);
     }
@@ -1341,7 +1346,9 @@ app.post('/api/projects/:id/workers', authenticateToken, async (req, res, next) 
 // Get project costing
 app.get('/api/projects/:id/costing', authenticateToken, async (req, res, next) => {
     try {
-        const materials = await ProjectMaterial.find({ project_id: req.params.id }).populate('material_id', 'name unit price_per_unit');
+        const allMaterials = await ProjectMaterial.find({ project_id: req.params.id })
+            .populate('material_id', 'name unit price_per_unit');
+        const materials = allMaterials.filter(m => !!m.material_id);
         const workers = await ProjectWorker.find({ project_id: req.params.id }).populate('worker_id', 'name role daily_wage');
 
         let material_cost = 0;
@@ -1392,7 +1399,9 @@ app.get('/api/quotations/:id', authenticateToken, async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Quotation not found' });
         }
 
-        const materials = await QuotationMaterial.find({ quotation_id: req.params.id }).populate('material_id', 'name unit');
+        const allMaterials = await QuotationMaterial.find({ quotation_id: req.params.id })
+            .populate('material_id', 'name unit');
+        const materials = allMaterials.filter(m => !!m.material_id);
         const workers = await QuotationWorker.find({ quotation_id: req.params.id }).populate('worker_id', 'name role');
 
         res.json({
@@ -2346,6 +2355,15 @@ app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, re
         if (!material) {
             return res.status(404).json({ success: false, message: 'Material not found' });
         }
+
+        // Also clean up references so deleted materials don't appear anywhere
+        await ProjectMaterial.deleteMany({ material_id: req.params.id });
+        await StageMaterial.deleteMany({ material_id: req.params.id });
+        await QuotationMaterial.deleteMany({ material_id: req.params.id });
+        await MaterialIndent.deleteMany({ material_id: req.params.id });
+
+        // Note: Purchase orders, transfers, inventory remain as historical records
+
         res.status(204).send();
     } catch (err) {
         next(err);
@@ -2387,11 +2405,15 @@ app.post('/api/suppliers', authenticateToken, async (req, res, next) => {
 // Global Indents
 app.get('/api/indents', authenticateToken, async (req, res, next) => {
     try {
-        const indents = await MaterialIndent.find({})
+        const allIndents = await MaterialIndent.find({})
             .populate('project_id', 'project_name')
             .populate('material_id', 'name unit')
             .populate('requested_by', 'name')
             .sort({ createdAt: -1 });
+
+        // Only show indents whose material still exists
+        const indents = allIndents.filter(i => !!i.material_id);
+
         res.json(indents);
     } catch (err) {
         next(err);
@@ -2414,10 +2436,13 @@ app.get('/api/purchase-orders', authenticateToken, async (req, res, next) => {
 // Material Indents (Requests from site)
 app.get('/api/projects/:id/indents', authenticateToken, async (req, res, next) => {
     try {
-        const indents = await MaterialIndent.find({ project_id: req.params.id })
+        const allIndents = await MaterialIndent.find({ project_id: req.params.id })
             .populate('material_id', 'name unit')
             .populate('requested_by', 'name')
             .sort({ createdAt: -1 });
+
+        const indents = allIndents.filter(i => !!i.material_id);
+
         res.json(indents);
     } catch (err) {
         next(err);
