@@ -8,6 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const cron = require('node-cron');
 const fs = require('fs');
+const nodemailer = require('nodemailer');
 
 const config = require('./config');
 const { authenticateToken, requireAdmin } = require('./middleware/auth');
@@ -18,6 +19,61 @@ const logger = require('./utils/logger');
 
 // Check if we're in a serverless environment (Vercel, AWS Lambda, etc.)
 const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || !fs.existsSync || typeof __dirname === 'undefined';
+
+// Email Configuration (Nodemailer)
+const emailConfig = {
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.EMAIL_PORT) || 587,
+    secure: false, // true for 465, false for other ports
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+};
+
+// Create email transporter
+let emailTransporter;
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    emailTransporter = nodemailer.createTransport(emailConfig);
+    console.log('Email transporter configured for:', process.env.EMAIL_USER);
+} else {
+    console.warn('Email credentials not configured. OTP will only work with phone.');
+}
+
+// Function to send OTP via email
+async function sendEmailOTP(email, otp) {
+    if (!emailTransporter) {
+        throw new Error('Email service not configured');
+    }
+
+    const mailOptions = {
+        from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+        to: email,
+        subject: 'Your Verification Code - BuildTrack',
+        html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background-color: #f3f4f6; padding: 20px; border-radius: 10px;">
+                    <h2 style="color: #1e3a8a; margin-bottom: 10px;">BuildTrack Verification</h2>
+                    <p style="color: #4b5563; font-size: 16px;">Your 6-digit verification code is:</p>
+                    <div style="background-color: white; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+                        <span style="font-size: 32px; font-weight: bold; color: #1e3a8a; letter-spacing: 5px;">${otp}</span>
+                    </div>
+                    <p style="color: #4b5563; font-size: 14px;">This code will expire in 5 minutes.</p>
+                    <p style="color: #9ca3af; font-size: 12px; margin-top: 20px;">If you didn't request this code, please ignore this email.</p>
+                </div>
+            </div>
+        `
+    };
+
+    try {
+        await emailTransporter.sendMail(mailOptions);
+        console.log(`OTP email sent to: ${email}`);
+        return true;
+    } catch (error) {
+        console.error('Error sending email OTP:', error);
+        throw new Error('Failed to send email');
+    }
+}
 
 const app = express();
 // CORS - allow all origins for now (restrict in production)
@@ -86,7 +142,8 @@ app.use(async (req, res, next) => {
 // User Model
 const userSchema = new mongoose.Schema({
     name: { type: String }, // Optional during initial OTP sign-up
-    phone: { type: String, required: true, unique: true },
+    phone: { type: String, unique: true, sparse: true },
+    email: { type: String, unique: true, sparse: true },
     password: { type: String }, // Optional for OTP-only accounts
     role: { type: String, enum: ['admin', 'staff', 'customer', 'builder', 'supervisor'], default: 'builder' },
     companyName: String,
@@ -580,33 +637,85 @@ const otpCache = new Map();
 
 // ==================== AUTH ROUTES ====================
 
-// Send OTP
+// Send OTP (Phone or Email)
 app.post('/api/auth/send-otp', async (req, res, next) => {
     try {
-        const { phone } = req.body;
-        if (!phone) return res.status(400).json({ success: false, message: 'Phone number is required' });
+        const { phone, email } = req.body;
+        
+        // Validate that either phone or email is provided
+        if (!phone && !email) {
+            return res.status(400).json({ success: false, message: 'Phone number or email is required' });
+        }
 
-        // Generate a simple 6-digit OTP
+        // Generate a random 6-digit OTP
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Determine the identifier (phone or email)
+        const identifier = email || phone;
+        const isEmail = !!email;
 
         // Store in cache for 5 minutes
-        otpCache.set(phone, { otp, expires: Date.now() + 5 * 60000 });
+        otpCache.set(identifier, { 
+            otp, 
+            expires: Date.now() + 5 * 60000,
+            isEmail 
+        });
 
-        console.log(`[OTP DEBUG] Sent OTP ${otp} to ${phone}`);
+        console.log(`[OTP DEBUG] Sent OTP ${otp} to ${identifier} (${isEmail ? 'email' : 'phone'})`);
 
-        res.json({ success: true, message: 'OTP sent successfully (Simulated)', otp: (process.env.NODE_ENV !== 'production' ? otp : undefined) });
+        // Send OTP via email if email is provided
+        if (isEmail) {
+            try {
+                await sendEmailOTP(email, otp);
+                res.json({ success: true, message: 'OTP sent successfully to your email' });
+            } catch (emailError) {
+                console.error('Email sending failed:', emailError);
+                // Fallback: return OTP in response for development
+                if (process.env.NODE_ENV === 'development') {
+                    res.json({ 
+                        success: true, 
+                        message: 'Email failed (dev mode: showing OTP)', 
+                        otp: otp 
+                    });
+                } else {
+                    res.status(500).json({ 
+                        success: false, 
+                        message: 'Failed to send email. Please try again or use phone verification.' 
+                    });
+                }
+            }
+        } else {
+            // For phone, just return success (in production, you'd integrate SMS service)
+            res.json({ 
+                success: true, 
+                message: 'OTP sent successfully (Simulated for phone)', 
+                otp: (process.env.NODE_ENV !== 'production' ? otp : undefined) 
+            });
+        }
     } catch (err) {
+        console.error('Send OTP error:', err);
         next(err);
     }
 });
 
-// Verify OTP
+// Verify OTP (Phone or Email)
 app.post('/api/auth/verify-otp', async (req, res, next) => {
     try {
-        const { phone, otp, role } = req.body;
-        if (!phone || !otp) return res.status(400).json({ success: false, message: 'Phone and OTP are required' });
+        const { phone, email, otp, role } = req.body;
+        
+        // Validate that either phone or email is provided
+        if (!phone && !email) {
+            return res.status(400).json({ success: false, message: 'Phone number or email is required' });
+        }
+        
+        if (!otp) {
+            return res.status(400).json({ success: false, message: 'OTP is required' });
+        }
 
-        const cached = otpCache.get(phone);
+        // Determine the identifier (phone or email)
+        const identifier = email || phone;
+
+        const cached = otpCache.get(identifier);
 
         // Simulation: Allow '123456' as a universal test OTP
         if (otp !== '123456' && (!cached || cached.otp !== otp || Date.now() > cached.expires)) {
@@ -614,14 +723,25 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         }
 
         // Clear OTP after successful use
-        otpCache.delete(phone);
+        otpCache.delete(identifier);
 
         // Find or create user
-        let user = await User.findOne({ phone });
+        let user;
         let isNew = false;
 
+        if (email) {
+            user = await User.findOne({ email });
+        } else {
+            user = await User.findOne({ phone });
+        }
+
         if (!user) {
-            user = new User({ phone, role: role || 'builder' });
+            // Create new user
+            user = new User({ 
+                phone: phone || undefined, 
+                email: email || undefined,
+                role: role || 'builder' 
+            });
             await user.save();
             isNew = true;
         } else if (!user.name || user.name.trim() === '') {
@@ -630,7 +750,7 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
         }
 
         const token = jwt.sign(
-            { id: user._id, phone: user.phone, role: user.role },
+            { id: user._id, phone: user.phone, email: user.email, role: user.role },
             config.jwtSecret,
             { expiresIn: config.jwtExpiresIn }
         );
@@ -639,9 +759,16 @@ app.post('/api/auth/verify-otp', async (req, res, next) => {
             success: true,
             token,
             isNew,
-            user: { id: user._id, name: user.name, phone: user.phone, role: user.role }
+            user: { 
+                id: user._id, 
+                name: user.name, 
+                phone: user.phone,
+                email: user.email,
+                role: user.role 
+            }
         });
     } catch (err) {
+        console.error('Verify OTP error:', err);
         next(err);
     }
 });
