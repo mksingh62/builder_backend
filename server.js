@@ -49,11 +49,11 @@ async function sendEmailOTP(email, otp) {
     const mailOptions = {
         from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
         to: email,
-        subject: 'Your Verification Code - BuildTrack',
+        subject: 'Your Verification Code - Vastoo',
         html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                 <div style="background-color: #f3f4f6; padding: 20px; border-radius: 10px;">
-                    <h2 style="color: #1e3a8a; margin-bottom: 10px;">BuildTrack Verification</h2>
+                    <h2 style="color: #1e3a8a; margin-bottom: 10px;">Vastoo Verification</h2>
                     <p style="color: #4b5563; font-size: 16px;">Your 6-digit verification code is:</p>
                     <div style="background-color: white; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
                         <span style="font-size: 32px; font-weight: bold; color: #1e3a8a; letter-spacing: 5px;">${otp}</span>
@@ -1744,10 +1744,10 @@ app.post('/api/seed', async (req, res, next) => {
         // Create App Settings
         await AppSetting.create([
             { key: 'gst_rate', value: 18 },
-            { key: 'company_name', value: 'BuildTrack Construction' },
+            { key: 'company_name', value: 'Vastoo Construction' },
             { key: 'company_address', value: '123 Construction Road, Mumbai-400001' },
             { key: 'company_phone', value: '+91-1234567890' },
-            { key: 'company_email', value: 'info@buildtrack.com' }
+            { key: 'company_email', value: 'info@vastoo.com' }
         ]);
 
         res.json({
