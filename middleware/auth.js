@@ -25,4 +25,11 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-module.exports = { authenticateToken, requireAdmin };
+const requireAdminOrBuilder = (req, res, next) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'builder') {
+    return res.status(403).json({ success: false, message: 'Admin or Builder access required' });
+  }
+  next();
+};
+
+module.exports = { authenticateToken, requireAdmin, requireAdminOrBuilder };
