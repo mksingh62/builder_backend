@@ -11,7 +11,7 @@ const fs = require('fs');
 const nodemailer = require('nodemailer');
 
 const config = require('./config');
-const { authenticateToken, requireAdmin } = require('./middleware/auth');
+const { authenticateToken, requireAdmin, requireAdminOrBuilder } = require('./middleware/auth');
 const errorHandler = require('./middleware/errorHandler');
 const { authLimiter } = require('./middleware/rateLimit');
 const { validatePhone, validatePassword } = require('./utils/validation');
@@ -2223,7 +2223,7 @@ app.put('/api/workers/:id', authenticateToken, async (req, res, next) => {
 });
 
 // Delete worker
-app.delete('/api/workers/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+app.delete('/api/workers/:id', authenticateToken, requireAdminOrBuilder, async (req, res, next) => {
     try {
         const worker = await Worker.findByIdAndDelete(req.params.id);
         if (!worker) {
@@ -2349,7 +2349,7 @@ app.put('/api/materials/:id', authenticateToken, async (req, res, next) => {
 });
 
 // Delete material
-app.delete('/api/materials/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+app.delete('/api/materials/:id', authenticateToken, requireAdminOrBuilder, async (req, res, next) => {
     try {
         const material = await Material.findByIdAndDelete(req.params.id);
         if (!material) {
